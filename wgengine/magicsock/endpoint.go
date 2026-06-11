@@ -591,13 +591,13 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 			pref := de.c.connectionPref
 			if udpAddr.isDirect() && !pref.directAllowed() {
 				// Direct is disabled; use DERP only.
-				return epAddr{}, de.derpAddr, false
+				return epAddr{}, de.prefDerpAddrLocked(), false
 			}
 			if udpAddr.isDirect() && pref.preferDERPOverDirect() {
-				return udpAddr, de.derpAddr, false
+				return udpAddr, de.prefDerpAddrLocked(), false
 			}
 			if udpAddr.vni.IsSet() && pref.preferDERPOverPeerRelay() {
-				return udpAddr, de.derpAddr, false
+				return udpAddr, de.prefDerpAddrLocked(), false
 			}
 		}
 		return udpAddr, netip.AddrPort{}, false
@@ -619,7 +619,7 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 			return udpAddr, netip.AddrPort{}, false
 		}
 	}
-	return udpAddr, de.derpAddr, false
+	return udpAddr, de.prefDerpAddrLocked(), false
 }
 
 // addrForWireGuardSendLocked returns the address that should be used for
@@ -2147,6 +2147,32 @@ func (de *endpoint) numStopAndReset() int64 {
 // must never run concurrent to [Conn.updateRelayServersSet], otherwise
 // [candidatePeerRelay] DERP home changes may be missed from the perspective of
 // [relayManager].
+// prefDerpAddrLocked returns the DERP address to use when sending to this peer,
+// respecting the connection preference. If the preference specifies exact DERP
+// regions and the peer's home DERP is not in the list, our own home DERP is used
+// instead to avoid connecting to non-preferred DERP regions.
+//
+// de.mu must be held. If de.c is nil, returns de.derpAddr.
+func (de *endpoint) prefDerpAddrLocked() netip.AddrPort {
+	if de.c == nil {
+		return de.derpAddr
+	}
+	pref := de.c.connectionPref
+	if pref.hasAnyDERP || len(pref.derpOrder) == 0 {
+		return de.derpAddr
+	}
+	peerRegion := int(de.derpAddr.Port())
+	if pref.derpRegionAllowed(peerRegion) {
+		return de.derpAddr
+	}
+	// Peer's home DERP is not in our preferred list; use our own home DERP.
+	ourDerp := de.c.myDerp
+	if ourDerp != 0 {
+		return netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(ourDerp))
+	}
+	return de.derpAddr
+}
+
 func (de *endpoint) setDERPHome(regionID uint16) {
 	de.mu.Lock()
 	defer de.mu.Unlock()
