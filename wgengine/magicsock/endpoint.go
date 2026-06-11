@@ -1403,6 +1403,11 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 		if !st.lastPing.IsZero() && now.Sub(st.lastPing) < discoPingInterval {
 			continue
 		}
+		// If the connection preference does not allow direct connections,
+		// skip sending disco pings to direct endpoints.
+		if de.c != nil && !de.c.connectionPref.directAllowed() {
+			continue
+		}
 
 		firstPing := !sentAny
 		sentAny = true

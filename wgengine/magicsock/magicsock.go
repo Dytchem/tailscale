@@ -2639,6 +2639,23 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 
 	ipDst := src
 	discoDest := di.discoKey
+
+	// If the connection preference only allows DERP (not direct),
+	// redirect the PONG reply through DERP even if the PING came via direct.
+	if !isDerp && !dstKey.IsZero() {
+		pref := c.connectionPref
+		if !pref.directAllowed() {
+			if ep, ok := c.peerMap.endpointForNodeKey(dstKey); ok {
+				ep.mu.Lock()
+				if ep.derpAddr.IsValid() {
+					ipDst = epAddr{ap: ep.derpAddr}
+					dstKey = ep.publicKey
+				}
+				ep.mu.Unlock()
+			}
+		}
+	}
+
 	go c.sendDiscoMessage(ipDst, dstKey, discoDest, &disco.Pong{
 		TxID: dm.TxID,
 		Src:  src.ap,
