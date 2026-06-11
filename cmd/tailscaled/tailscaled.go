@@ -124,20 +124,21 @@ var args struct {
 	// or comma-separated list thereof.
 	tunname string
 
-	cleanUp             bool
-	confFile            string // empty, file path, or "vm:user-data"
-	debug               string
-	port                uint16
-	statepath           string
-	encryptState        boolFlag
-	statedir            string
-	socketpath          string
-	birdSocketPath      string
-	verbose             int
-	socksAddr           string // listen address for SOCKS5 server
-	httpProxyAddr       string // listen address for HTTP proxy server
-	disableLogs         bool
-	hardwareAttestation boolFlag
+	cleanUp              bool
+	confFile             string // empty, file path, or "vm:user-data"
+	connectionPreference string // ordered list of connection methods to use
+	debug                string
+	port                 uint16
+	statepath            string
+	encryptState         boolFlag
+	statedir             string
+	socketpath           string
+	birdSocketPath       string
+	verbose              int
+	socksAddr            string // listen address for SOCKS5 server
+	httpProxyAddr        string // listen address for HTTP proxy server
+	disableLogs          bool
+	hardwareAttestation  boolFlag
 }
 
 var (
@@ -217,7 +218,7 @@ func main() {
 	}
 	flag.BoolVar(&printVersion, "version", false, "print version information and exit")
 	flag.BoolVar(&args.disableLogs, "no-logs-no-support", false, "disable log uploads; this also disables any technical support")
-	flag.StringVar(&args.confFile, "config", "", "path to config file, or 'vm:user-data' to use the VM's user-data (EC2)")
+	flag.StringVar(&args.connectionPreference, "connection-preference", "", `ordered list of connection methods and DERP regions, e.g. "direct,derp:999,derp:*,peer-relay". See TS_CONNECTION_PREFERENCE in envknob.`)
 	if buildfeatures.HasTPM {
 		flag.Var(&args.hardwareAttestation, "hardware-attestation", `use hardware-backed keys to bind node identity to this device when supported
 by the OS and hardware. Uses TPM 2.0 on Linux and Windows; SecureEnclave on
@@ -253,6 +254,10 @@ store state on filesystem.`)
 		if runtime.GOOS != "windows" || (flag.Arg(0) != "/subproc" && flag.Arg(0) != "/firewall") {
 			log.Fatalf("tailscaled does not take non-flag arguments: %q", flag.Args())
 		}
+	}
+
+	if args.connectionPreference != "" {
+		envknob.Setenv("TS_CONNECTION_PREFERENCE", args.connectionPreference)
 	}
 
 	if fd, ok := envknob.LookupInt("TS_PARENT_DEATH_FD"); ok && fd > 2 {

@@ -143,6 +143,14 @@ func (c *Conn) pickDERPFallback() int {
 		return pickDERPFallbackForTests()
 	}
 
+	// If connection preference specifies DERP region ordering, pick the first.
+	if cPref := c.connectionPref; !cPref.hasAnyDERP && len(cPref.derpOrder) > 0 {
+		if _, ok := c.derpMap.Regions[cPref.derpOrder[0]]; ok {
+			return cPref.derpOrder[0]
+		}
+		return 0 // specific region not in map, no DERP
+	}
+
 	metricDERPHomeFallback.Add(1)
 	return ids[rands.IntN(uint64(uintptr(unsafe.Pointer(c))), len(ids))]
 }
@@ -200,6 +208,20 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report, force bool) (preferr
 		// one.
 		preferredDERP = c.pickDERPFallback()
 	}
+
+	// Apply connection preference for DERP region selection.
+	// If the user has specified a preferred DERP region ordering,
+	// use that instead of the latency-based selection.
+	// If no preferred region is reachable and the preference only allows
+	// specific regions (no wildcard), don't fall back to any DERP.
+	if cPref := c.connectionPref; !cPref.hasAnyDERP && len(cPref.derpOrder) > 0 {
+		if selected := cPref.selectPreferredDERP(report.RegionLatency, c.myDerp); selected != 0 {
+			preferredDERP = selected
+		} else {
+			preferredDERP = 0 // no fallback when specific regions are required
+		}
+	}
+
 	if preferredDERP != myDerp {
 		c.logf(
 			"magicsock: home DERP changing from derp-%d [%dms] to derp-%d [%dms] (forced=%t)",
