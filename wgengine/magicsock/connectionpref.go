@@ -268,6 +268,10 @@ func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, curre
 		if currentHome != 0 && p.derpRegion[currentHome] {
 			return currentHome
 		}
+
+		// Even without latency data, force-connect to the first preferred region.
+		// The STUN probe might have failed (UDP blocked) but TCP DERP may still work.
+		return p.derpOrder[0]
 	}
 
 	// If we have "any DERP" as fallback, return 0 to let existing netcheck logic decide.

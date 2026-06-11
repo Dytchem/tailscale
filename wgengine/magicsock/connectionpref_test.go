@@ -226,10 +226,10 @@ func TestConnPref_SelectPreferredDERP(t *testing.T) {
 		t.Errorf("expected 900 as current home, got %d", selected)
 	}
 
-	// If no preferred region has latency, should return 0
+	// If no preferred region has latency, force-connect to the first preferred region
 	emptyLatency := map[int]time.Duration{}
-	if selected := p.selectPreferredDERP(emptyLatency, 0); selected != 0 {
-		t.Errorf("expected 0 for no reachable regions, got %d", selected)
+	if selected := p.selectPreferredDERP(emptyLatency, 0); selected != 901 {
+		t.Errorf("expected 901 as forced first region, got %d", selected)
 	}
 
 	// With specific ordering AND derp:* fallback: specific regions are checked first,
