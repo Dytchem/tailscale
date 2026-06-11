@@ -425,6 +425,10 @@ type Conn struct {
 	// homeDERPGauge is the usermetric gauge for the home DERP region ID.
 	// This can be nil when [Options.Metrics] are not enabled.
 	homeDERPGauge *usermetric.Gauge
+
+	// connectionPref holds the parsed connection method preference, controlling
+	// the priority ordering of direct UDP, DERP regions, and peer relay.
+	connectionPref connPref
 }
 
 // SetDebugLoggingEnabled controls whether spammy debug logging is enabled.
@@ -585,6 +589,7 @@ func newConn(logf logger.Logf) *Conn {
 		initializedAt: mono.Now(),
 	}
 	c.discoAtomic.Set(discoPrivate)
+	c.connectionPref = getConnPref()
 	c.bind = &connBind{Conn: c, closed: true}
 	c.receiveBatchPool = sync.Pool{New: func() any {
 		msgs := make([]ipv6.Message, c.bind.BatchSize())

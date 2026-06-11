@@ -584,6 +584,22 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 	udpAddr = de.bestAddr.epAddr
 
 	if udpAddr.ap.IsValid() && !now.After(de.trustBestAddrUntil) {
+		// We have a trusted UDP path. But if the connection preference
+		// says DERP should be preferred over this type of path, include
+		// DERP as well (or skip UDP entirely).
+		if de.c != nil {
+			pref := de.c.connectionPref
+			if udpAddr.isDirect() && !pref.directAllowed() {
+				// Direct is disabled; use DERP only.
+				return epAddr{}, de.derpAddr, false
+			}
+			if udpAddr.isDirect() && pref.preferDERPOverDirect() {
+				return udpAddr, de.derpAddr, false
+			}
+			if udpAddr.vni.IsSet() && pref.preferDERPOverPeerRelay() {
+				return udpAddr, de.derpAddr, false
+			}
+		}
 		return udpAddr, netip.AddrPort{}, false
 	}
 
@@ -596,6 +612,13 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 
 	// We had a bestAddr but it expired so send both to it
 	// and DERP.
+	// If the preference only allows specific methods, don't fall back to DERP.
+	if de.c != nil {
+		pref := de.c.connectionPref
+		if udpAddr.isDirect() && !pref.derpAllowed() {
+			return udpAddr, netip.AddrPort{}, false
+		}
+	}
 	return udpAddr, de.derpAddr, false
 }
 
@@ -904,6 +927,9 @@ func (de *endpoint) discoverUDPRelayPathsLocked(now mono.Time) {
 // path discovery.
 func (de *endpoint) wantUDPRelayPathDiscoveryLocked(now mono.Time) bool {
 	if runtime.GOOS == "js" {
+		return false
+	}
+	if de.c == nil || !de.c.connectionPref.allowPeerRelay() {
 		return false
 	}
 	if !de.c.relayManager.hasPeerRelayServers.Load() {
@@ -1787,6 +1813,23 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 			wireMTU: pingSizeToPktLen(sp.size, sp.to),
 		}
 		bestUntrusted := now.After(de.trustBestAddrUntil)
+
+		// If connection preference says DERP should come before direct,
+		// don't promote a direct path unless we have no working path at all.
+		if de.c != nil {
+			pref := de.c.connectionPref
+			if thisPong.isDirect() && !pref.directAllowed() {
+				goto skipPromotion
+			}
+			if thisPong.isDirect() && pref.preferDERPOverDirect() && de.derpAddr.IsValid() {
+				if !de.bestAddr.ap.IsValid() && bestUntrusted {
+					de.setBestAddrLocked(thisPong)
+					de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
+				}
+				goto skipPromotion
+			}
+		}
+
 		if betterAddr(thisPong, de.bestAddr) || bestUntrusted {
 			de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
 			de.debugUpdates.Add(EndpointChange{
@@ -1808,6 +1851,7 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 			de.bestAddrAt = now
 			de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
 		}
+	skipPromotion:
 	}
 	return
 }
