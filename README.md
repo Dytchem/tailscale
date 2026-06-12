@@ -23,6 +23,37 @@ Other [Tailscale repos](https://github.com/orgs/tailscale/repositories) of note:
 For background on which parts of Tailscale are open source and why,
 see [https://tailscale.com/opensource/](https://tailscale.com/opensource/).
 
+## Dytchem Fork — Connection Preference
+
+This fork adds `--connection-preference` / `TS_CONNECTION_PREFERENCE` to
+control the priority ordering of connection methods (direct UDP, DERP relay,
+peer relay). Unlike upstream Tailscale's automatic path selection, this allows
+exact specification of which connection methods to use and in what order.
+
+```
+tailscaled --connection-preference=derp:902,derp:*,direct
+```
+
+### Syntax
+
+- `direct` — Direct UDP only
+- `derp:<region_id>` — Specific DERP region (e.g. `derp:902`)
+- `derp:*` — Any DERP region
+- `peer-relay` — Peer relay (Geneve-encapsulated)
+
+Comma-separated ordered list. When a single method is specified, no fallback
+to other methods occurs. Multiple methods create a priority chain.
+
+### Example: Force DERP 902 only
+
+```
+tailscaled --connection-preference=derp:902
+```
+
+The node will exclusively use DERP region 902, refusing direct connections
+and other DERP regions. Verified on Linux (userspace-networking) and FreeBSD
+with three exit nodes in production.
+
 ## Using
 
 We serve packages for a variety of distros and platforms at
