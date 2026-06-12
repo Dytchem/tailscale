@@ -376,6 +376,14 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 		return nil
 	}
 
+	// If the connection preference specifies exact DERP regions and this
+	// region is not in the allowed list, don't create or use a connection.
+	if !c.connectionPref.hasAnyDERP && len(c.connectionPref.derpOrder) > 0 {
+		if !c.connectionPref.derpRegionAllowed(regionID) {
+			return nil
+		}
+	}
+
 	// See if we have a connection open to that DERP node ID
 	// first. If so, might as well use it. (It's a little
 	// arbitrary whether we use this one vs. the reverse route
