@@ -1,13 +1,15 @@
-# Tailscale
+# Tailscale — Dytchem Fork
 
-https://tailscale.com
+**Fork with `--connection-preference` support for precise control
+over DERP/direct/relay path selection.**
 
-Private WireGuard® networks made easy
+Upstream: https://tailscale.com — Private WireGuard® networks made easy
 
 ## Overview
 
-This repository contains the majority of Tailscale's open source code.
-Notably, it includes the `tailscaled` daemon and
+This repository contains the majority of Tailscale's open source code,
+plus Dytchem's connection-preference extension.
+It includes the `tailscaled` daemon and
 the `tailscale` CLI tool. The `tailscaled` daemon runs on Linux, Windows,
 [macOS](https://tailscale.com/kb/1065/macos-variants/), and to varying degrees
 on FreeBSD and OpenBSD. The Tailscale iOS and Android apps use this repo's
@@ -24,6 +26,8 @@ For background on which parts of Tailscale are open source and why,
 see [https://tailscale.com/opensource/](https://tailscale.com/opensource/).
 
 ## Dytchem Fork — Connection Preference
+
+**GitHub**: https://github.com/Dytchem/tailscale
 
 This fork adds `--connection-preference` / `TS_CONNECTION_PREFERENCE` to
 control the priority ordering of connection methods (direct UDP, DERP relay,
