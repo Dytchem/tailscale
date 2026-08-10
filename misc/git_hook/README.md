@@ -9,9 +9,18 @@ The shared logic lives in the `githook/` package and is also imported by
 
 From the repo root:
 
-    ./tool/go run ./misc/install-git-hooks.go
+    ./tool/go run ./misc/add-git-hooks.go
 
 The script auto-updates in the future.
+
+
+## Large file check
+
+The pre-push hook rejects pushes that add or change any blob over 1.5
+MB, using the same tree diff logic as the check-file-size CI workflow.
+To push a large file intentionally, set an environment variable:
+
+    TS_SKIP_LARGE_FILE_CHECK=1 git push ...
 
 
 ## Adding your own hooks

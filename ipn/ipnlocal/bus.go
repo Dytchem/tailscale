@@ -24,10 +24,7 @@ import (
 // runtime.GOOS is a compile-time constant, so the producer-side code that
 // builds and ships NetMap on the bus is dead-code-eliminated on Linux and
 // other geese where this is false.
-const goosGetsLegacyNetmapNotify = runtime.GOOS == "windows" ||
-	runtime.GOOS == "darwin" ||
-	runtime.GOOS == "ios" ||
-	runtime.GOOS == "android"
+const goosGetsLegacyNetmapNotify = runtime.GOOS == "windows"
 
 type rateLimitingBusSender struct {
 	fn              func(*ipn.Notify) (keepGoing bool)
@@ -241,10 +238,12 @@ func isNotableNotify(n *ipn.Notify) bool {
 		len(n.PeersChanged) > 0 ||
 		len(n.PeersRemoved) > 0 ||
 		len(n.UserProfiles) > 0 ||
+		len(n.PeerState) > 0 ||
 		!n.DriveShares.IsNil() ||
 		n.Health != nil ||
 		len(n.IncomingFiles) > 0 ||
 		len(n.OutgoingFiles) > 0 ||
 		n.FilesWaiting != nil ||
-		n.SuggestedExitNode != nil
+		n.SuggestedExitNode != nil ||
+		n.Policy != nil
 }

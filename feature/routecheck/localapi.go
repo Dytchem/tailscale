@@ -4,20 +4,24 @@
 package routecheck
 
 import (
+	"context"
+	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	jsonv2 "github.com/go-json-experiment/json"
 	jsonv1 "github.com/go-json-experiment/json/v1"
 
+	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/ipn/localapi"
 	"tailscale.com/net/routecheck"
+	"tailscale.com/util/def"
 	"tailscale.com/util/httpm"
 )
 
 func init() {
 	localapi.Register("routecheck", serveRouteCheck)
+	localapi.HookRouteCheckRefresh.Set(routeCheckRefresh)
 }
 
 // ServeRouteCheck handles the API endpoint that serves the routecheck Report.
@@ -37,18 +41,16 @@ func serveRouteCheck(h *localapi.Handler, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var err error
-	var report *routecheck.Report
-	if defBool(r.FormValue("probe"), false) {
-		timeout := defDuration(r.FormValue("timeout"), routecheck.DefaultTimeout)
-		timeout = min(max(0, timeout), 60*time.Second) // clamp to [0s, 60s]
-		report, err = rc.Refresh(r.Context(), timeout)
-	} else {
-		report = rc.Report()
-	}
-	if err != nil {
-		localapi.WriteErrorJSON(w, err)
-		return
+	report := rc.Report()
+	if def.Bool(r.FormValue("probe"), false) {
+		timeout := def.Duration(r.FormValue("timeout"), routecheck.DefaultTimeout)
+		timeout = clampRouteCheckTimeout(timeout)
+		rp, err := rc.Refresh(r.Context(), timeout)
+		if err != nil {
+			localapi.WriteErrorJSON(w, err)
+			return
+		}
+		report = rp
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -62,24 +64,21 @@ func serveRouteCheck(h *localapi.Handler, w http.ResponseWriter, r *http.Request
 	jsonv2.MarshalWrite(w, report, jsonv1.DefaultOptionsV1())
 }
 
-func defBool(a string, def bool) bool {
-	if a == "" {
-		return def
+func clampRouteCheckTimeout(timeout time.Duration) time.Duration {
+	if timeout < 0 {
+		timeout = routecheck.DefaultTimeout
 	}
-	v, err := strconv.ParseBool(a)
-	if err != nil {
-		return def
-	}
-	return v
+	return min(max(0, timeout), 60*time.Second) // clamp to [0s, 60s]
 }
 
-func defDuration(a string, def time.Duration) time.Duration {
-	if a == "" {
-		return def
+// routeCheckRefresh is a localapi hook for refreshing the [routecheck.Client.Report].
+// If the timeout is 0, all probes will timeout immediately.
+// If the timeout is negative, then all probes will use the [DefaultTimeout].
+func routeCheckRefresh(b *ipnlocal.LocalBackend, ctx context.Context, timeout time.Duration) error {
+	rc := ClientFor(b)
+	if rc == nil {
+		return errors.New("routecheck is not enabled")
 	}
-	v, err := time.ParseDuration(a)
-	if err != nil {
-		return def
-	}
-	return v
+	_, err := rc.Refresh(ctx, clampRouteCheckTimeout(timeout))
+	return err
 }

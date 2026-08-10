@@ -444,6 +444,7 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 		return derpMap.Regions[regionID]
 	})
 	dc.HealthTracker = c.health
+	dc.AppName = c.derpAppName
 	if c.extraRootCAs != nil {
 		dc.TLSConfig = &tls.Config{RootCAs: c.extraRootCAs}
 	}

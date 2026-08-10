@@ -51,6 +51,8 @@ import (
 	"tailscale.com/net/tstun"
 	"tailscale.com/syncs"
 	"tailscale.com/tailcfg"
+	"tailscale.com/tailcfg/nodecap"
+	"tailscale.com/tailcfg/peercap"
 	"tailscale.com/tsconst"
 	"tailscale.com/tstime"
 	"tailscale.com/tstime/mono"
@@ -170,6 +172,7 @@ type Conn struct {
 	health                 *health.Tracker                        // or nil
 	extraRootCAs           *x509.CertPool                         // additional trusted root CAs; or nil
 	controlKnobs           *controlknobs.Knobs                    // or nil
+	derpAppName            string                                 // or empty, see Options.DERPAppName
 
 	// ================================================================
 	// No locking required to access these fields, either because
@@ -180,10 +183,9 @@ type Conn struct {
 	connCtxCancel func()          // closes connCtx
 	donec         <-chan struct{} // connCtx.Done()'s to avoid context.cancelCtx.Done()'s mutex per call
 
-	allocRelayEndpointPub    *eventbus.Publisher[UDPRelayAllocReq]
-	portUpdatePub            *eventbus.Publisher[router.PortUpdate]
-	tsmpDiscoKeyAvailablePub *eventbus.Publisher[NewDiscoKeyAvailable]
-	homeDERPChangedPub       *eventbus.Publisher[HomeDERPChanged]
+	allocRelayEndpointPub *eventbus.Publisher[UDPRelayAllocReq]
+	portUpdatePub         *eventbus.Publisher[router.PortUpdate]
+	homeDERPChangedPub    *eventbus.Publisher[HomeDERPChanged]
 
 	// pconn4 and pconn6 are the underlying UDP sockets used to
 	// send/receive packets for wireguard and other magicsock
@@ -327,12 +329,6 @@ type Conn struct {
 	// for a period of time before withdrawing them.
 	endpointTracker endpointTracker
 
-	// peerSet is the set of peers that are currently configured in
-	// WireGuard. These are not used to filter inbound or outbound
-	// traffic at all, but only to track what state can be cleaned up
-	// in other maps below that are keyed by peer public key.
-	peerSet set.Set[key.NodePublic]
-
 	// peerMap tracks the networkmap Node entity for each peer
 	// by node key, node ID, and discovery key.
 	peerMap peerMap
@@ -429,6 +425,13 @@ type Conn struct {
 	// connectionPref holds the parsed connection method preference, controlling
 	// the priority ordering of direct UDP, DERP regions, and peer relay.
 	connectionPref connPref
+
+	// checkNetworkUpDuringTests controls whether [Conn.networkDown]
+	// will report the value of [Conn.networkUp] while running tests.
+	//
+	// This allows tests to pass when the user's machine is offline,
+	// but allows us to still test network-down behaviour when desired.
+	checkNetworkUpDuringTests bool
 }
 
 // SetDebugLoggingEnabled controls whether spammy debug logging is enabled.
@@ -491,6 +494,10 @@ type Options struct {
 	// ExtraRootCAs, if non-nil, specifies additional trusted root CAs
 	// for TLS connections to DERP servers.
 	ExtraRootCAs *x509.CertPool
+
+	// DERPAppName, if non-empty, is an opaque app name string to
+	// advertise to DERP servers for stats purposes.
+	DERPAppName string
 
 	// Metrics specifies the metrics registry to record metrics to.
 	Metrics *usermetric.Registry
@@ -677,7 +684,6 @@ func NewConn(opts Options) (*Conn, error) {
 	c.eventClient = ec
 	c.allocRelayEndpointPub = eventbus.Publish[UDPRelayAllocReq](ec)
 	c.portUpdatePub = eventbus.Publish[router.PortUpdate](ec)
-	c.tsmpDiscoKeyAvailablePub = eventbus.Publish[NewDiscoKeyAvailable](ec)
 	c.homeDERPChangedPub = eventbus.Publish[HomeDERPChanged](ec)
 	eventbus.SubscribeFunc(ec, c.onPortMapChanged)
 	eventbus.SubscribeFunc(ec, c.onUDPRelayAllocResp)
@@ -709,6 +715,7 @@ func NewConn(opts Options) (*Conn, error) {
 	c.netMon = opts.NetMon
 	c.health = opts.HealthTracker
 	c.extraRootCAs = opts.ExtraRootCAs
+	c.derpAppName = opts.DERPAppName
 	c.getPeerByKey = opts.PeerByKeyFunc
 
 	if err := c.rebind(keepCurrentPort); err != nil {
@@ -1252,8 +1259,7 @@ func (c *Conn) DiscoPublicKey() key.DiscoPublic {
 
 // RotateDiscoKey generates a new discovery key pair and updates the connection
 // to use it. This invalidates all existing disco sessions and will cause peers
-// to re-establish discovery sessions with the new key. Addtionally, the
-// lastTSMPDiscoAdvertisement on all endpoints is reset to 0.
+// to re-establish discovery sessions with the new key.
 //
 // This is primarily for debugging and testing purposes, a future enhancement
 // should provide a mechanism for seamless rotation by supporting short term use
@@ -1267,11 +1273,6 @@ func (c *Conn) RotateDiscoKey() {
 	newShort := c.discoAtomic.Short()
 	c.discoInfo = make(map[key.DiscoPublic]*discoInfo)
 	connCtx := c.connCtx
-	for _, endpoint := range c.peerMap.byEpAddr {
-		endpoint.ep.mu.Lock()
-		endpoint.ep.lastDiscoKeyAdvertisement = 0
-		endpoint.ep.mu.Unlock()
-	}
 	c.mu.Unlock()
 
 	c.logf("magicsock: rotated disco key from %v to %v", oldShort, newShort)
@@ -1487,14 +1488,10 @@ func (c *Conn) LocalPort() uint16 {
 
 var errNetworkDown = errors.New("magicsock: network down")
 
-// This allows tests to pass when the user's machine is offline, but allows us
-// to still test network-down behaviour when desired.
-var checkNetworkDownDuringTests = false
-
 func (c *Conn) networkDown() bool {
 	// For tests, always assume the network is up unless we're explicitly
 	// testing this behaviour.
-	if envknob.AssumeNetworkUp() || (testenv.InTest() && !checkNetworkDownDuringTests) {
+	if envknob.AssumeNetworkUp() || (testenv.InTest() && !c.checkNetworkUpDuringTests) {
 		return false
 	}
 	return !c.networkUp.Load()
@@ -2403,7 +2400,7 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 		if isCached {
 			metricCachedPeerContactDERP.Add(1)
 		}
-		// If we did not already have an an endpoint for this peer, even a stale
+		// If we did not already have an endpoint for this peer, even a stale
 		// one, record how long it has been since the endpoint was initialized.
 		if !lastBest.ap.IsValid() {
 			c.logf("magicsock: new contact: peer=%s usec=%d cached=%v via=derp",
@@ -2491,7 +2488,7 @@ func (c *Conn) handleDiscoMessage(msg []byte, src epAddr, shouldBeRelayHandshake
 			// unexpected
 			return
 		}
-		if !nodeHasCap(c.filt, peer, c.self, tailcfg.PeerCapabilityRelay) {
+		if !nodeHasCap(c.filt, peer, c.self, peercap.Relay) {
 			return
 		}
 		// [Conn.mu] must not be held while publishing, or [Conn.onUDPRelayAllocResp]
@@ -2694,8 +2691,6 @@ func (c *Conn) enqueueCallMeMaybe(derpAddr netip.AddrPort, de *endpoint) {
 		return
 	}
 
-	c.maybeSendTSMPDiscoAdvert(de)
-
 	eps := make([]netip.AddrPort, 0, len(c.lastEndpoints))
 	for _, ep := range c.lastEndpoints {
 		eps = append(eps, ep.Addr)
@@ -2815,31 +2810,6 @@ func (c *Conn) SetPrivateKey(privateKey key.NodePrivate) error {
 	}
 
 	return nil
-}
-
-// UpdatePeers is called when the set of WireGuard peers changes. It
-// then removes any state for old peers.
-//
-// The caller passes ownership of newPeers map to UpdatePeers.
-func (c *Conn) UpdatePeers(newPeers set.Set[key.NodePublic]) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	oldPeers := c.peerSet
-	c.peerSet = newPeers
-
-	// Clean up any key.NodePublic-keyed maps for peers that no longer
-	// exist.
-	for peer := range oldPeers {
-		if !newPeers.Contains(peer) {
-			delete(c.derpRoute, peer)
-			delete(c.peerLastDerp, peer)
-		}
-	}
-
-	if len(oldPeers) == 0 && len(newPeers) > 0 {
-		go c.ReSTUN("non-zero-peers")
-	}
 }
 
 // debugRingBufferSize returns a maximum size for our set of endpoint ring
@@ -2985,7 +2955,7 @@ func (c *Conn) updateRelayServersSet(filt *filter.Filter, self tailcfg.NodeView,
 			// compiled [tailcfg.CurrentCapabilityVersion]) forward.
 			continue
 		}
-		if !nodeHasCap(filt, maybeCandidate, self, tailcfg.PeerCapabilityRelayTarget) {
+		if !nodeHasCap(filt, maybeCandidate, self, peercap.RelayTarget) {
 			continue
 		}
 		relayServers.Add(candidatePeerRelay{
@@ -3000,10 +2970,15 @@ func (c *Conn) updateRelayServersSet(filt *filter.Filter, self tailcfg.NodeView,
 }
 
 // nodeHasCap returns true if src has cap on dst, otherwise it returns false.
-func nodeHasCap(filt *filter.Filter, src, dst tailcfg.NodeView, cap tailcfg.PeerCapability) bool {
+func nodeHasCap(filt *filter.Filter, src, dst tailcfg.NodeView, cap peercap.Cap) bool {
 	if filt == nil ||
 		!src.Valid() ||
 		!dst.Valid() {
+		return false
+	}
+	if src.UnsignedPeerAPIOnly() {
+		// Unsigned peers aren't covered by tailnet lock and must never hold
+		// peer capabilities such as relay allocation/target.
 		return false
 	}
 	for _, srcPrefix := range src.Addresses().All() {
@@ -3071,8 +3046,8 @@ func (c *Conn) setNetworkMapInternal(self tailcfg.NodeView, peers []tailcfg.Node
 	peersChanged, selfWasValid := c.updateNodes(self, peers)
 
 	relayClientEnabled := self.Valid() &&
-		!self.HasCap(tailcfg.NodeAttrDisableRelayClient) &&
-		!self.HasCap(tailcfg.NodeAttrOnlyTCP443)
+		!self.HasCap(nodecap.DisableRelayClient) &&
+		!self.HasCap(nodecap.OnlyTCP443)
 
 	udpOffloadKnobsChanged := false
 	var curGRO, curGSO bool
@@ -3184,7 +3159,21 @@ func (c *Conn) updateNodes(self tailcfg.NodeView, peers []tailcfg.NodeView) (pee
 		// Duplicate NodeIDs in the input shouldn't happen, but log if so.
 		c.logf("[unexpected] magicsock.updateNodes: %d peers input but %d unique IDs", len(peers), len(newPeers))
 	}
+	// Clean up node-key-keyed state for peers that are gone or have
+	// rotated their node key.
+	for id, prev := range c.peersByID {
+		if n, ok := newPeers[id]; !ok || n.Key() != prev.Key() {
+			delete(c.derpRoute, prev.Key())
+			delete(c.peerLastDerp, prev.Key())
+		}
+	}
+	hadPeers := len(c.peersByID) > 0
 	c.peersByID = newPeers
+	// A key-less conn can't STUN; the ReSTUN("set-private-key") on
+	// first key covers peers that arrived before the key.
+	if !hadPeers && len(newPeers) > 0 && !c.privateKey.IsZero() {
+		go c.ReSTUN("non-zero-peers")
+	}
 
 	// If the upsert pass left stale endpoints in peerMap (peers removed
 	// relative to before), clean them up.
@@ -3338,7 +3327,16 @@ func (c *Conn) UpsertPeer(n tailcfg.NodeView) {
 		return
 	}
 	flags := c.debugFlagsLocked()
+	if prev, ok := c.peersByID[n.ID()]; ok && prev.Key() != n.Key() {
+		delete(c.derpRoute, prev.Key())
+		delete(c.peerLastDerp, prev.Key())
+	}
+	hadPeers := len(c.peersByID) > 0
 	mak.Set(&c.peersByID, n.ID(), n)
+	// See the matching trigger in updateNodes for why the key check.
+	if !hadPeers && !c.privateKey.IsZero() {
+		go c.ReSTUN("non-zero-peers")
+	}
 	c.upsertPeerLocked(n, flags, debugRingBufferSize(len(c.peersByID)))
 
 	var relayUpsert candidatePeerRelay
@@ -3376,6 +3374,8 @@ func (c *Conn) RemovePeer(nid tailcfg.NodeID) {
 		return
 	}
 	delete(c.peersByID, nid)
+	delete(c.derpRoute, prev.Key())
+	delete(c.peerLastDerp, prev.Key())
 	if ep, ok := c.peerMap.endpointForNodeID(nid); ok {
 		c.peerMap.deleteEndpoint(ep)
 	}
@@ -3412,7 +3412,7 @@ func (c *Conn) relayCandidateLocked(p tailcfg.NodeView) (ok bool, cp candidatePe
 	if !capVerIsRelayCapable(p.Cap()) {
 		return false, candidatePeerRelay{}
 	}
-	if !nodeHasCap(c.filt, p, c.self, tailcfg.PeerCapabilityRelayTarget) {
+	if !nodeHasCap(c.filt, p, c.self, peercap.RelayTarget) {
 		return false, candidatePeerRelay{}
 	}
 	return true, candidatePeerRelay{
@@ -3645,7 +3645,7 @@ func (c *Conn) shouldDoPeriodicReSTUNLocked() bool {
 	if c.networkDown() || c.homeless {
 		return false
 	}
-	if len(c.peerSet) == 0 || c.privateKey.IsZero() {
+	if len(c.peersByID) == 0 || c.privateKey.IsZero() {
 		// If no peers, not worth doing.
 		// Also don't if there's no key (not running).
 		return false
@@ -4336,6 +4336,8 @@ var (
 	metricTSMPDiscoKeyAdvertisementReceived  = clientmetric.NewCounter("magicsock_tsmp_disco_key_advertisement_received")
 	metricTSMPDiscoKeyAdvertisementApplied   = clientmetric.NewCounter("magicsock_tsmp_disco_key_advertisement_applied")
 	metricTSMPDiscoKeyAdvertisementUnchanged = clientmetric.NewCounter("magicsock_tsmp_disco_key_advertisement_unchanged")
+	metricTSMPDiscoKeyAdvertisementSent      = clientmetric.NewCounter("magicsock_tsmp_disco_key_advertisement_sent")
+	metricTSMPDiscoKeyAdvertisementError     = clientmetric.NewCounter("magicsock_tsmp_disco_key_advertisement_error")
 
 	// Counters for peer contacts established using cached network map data.
 	metricCachedPeerContactDERP   = clientmetric.NewCounter("magicsock_cached_peer_contact_derp")
@@ -4364,10 +4366,35 @@ func (c *Conn) GetLastNetcheckReport(ctx context.Context) *netcheck.Report {
 	return c.lastNetCheckReport.Load()
 }
 
-// SetLastNetcheckReportForTest sets the magicsock conn's last netcheck report.
-// Used for testing purposes.
-func (c *Conn) SetLastNetcheckReportForTest(ctx context.Context, report *netcheck.Report) {
-	c.lastNetCheckReport.Store(report)
+// AddNetcheckReportForTest records report in the conn's netcheck client's
+// recent-report history as if it had been produced at time now, seeding the
+// netcheck client's per-region latency history. If report is newer than the
+// currently stored last netcheck report, it also becomes the last netcheck
+// report.
+func (c *Conn) AddNetcheckReportForTest(dm *tailcfg.DERPMap, report *netcheck.Report, now time.Time) {
+	testenv.AssertInTest()
+	rep := report.Clone() // netchecker mutates the report, so create a copy
+	c.netChecker.AddReportHistoryForTest(dm, rep, now)
+	for {
+		if cur := c.lastNetCheckReport.Load(); cur == nil || rep.Now.After(cur.Now) {
+			if c.lastNetCheckReport.CompareAndSwap(cur, rep) {
+				break
+			}
+		}
+	}
+}
+
+// GetDERPRegionLatency returns the lowest latency seen per DERP region over
+// netcheck's recent history, keyed by region ID. Unlike the most recent report
+// from GetLastNetcheckReport (which for an incremental netcheck covers only a
+// few regions), netcheck's history retains every region measured by the most
+// recent full netcheck, so this can rank regions the latest report did not
+// re-probe. It returns nil if the netcheck client is not yet initialized.
+func (c *Conn) GetDERPRegionLatency() map[int]time.Duration {
+	if c.netChecker == nil {
+		return nil
+	}
+	return c.netChecker.RecentRegionLatency()
 }
 
 // lazyEndpoint is a wireguard [conn.Endpoint] for when magicsock received a
@@ -4492,7 +4519,12 @@ func (c *Conn) PeerRelays() set.Set[netip.Addr] {
 // node is the Tailscale tailcfg.NodeView of the peer that sent the update.
 func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.TSMPDiscoKeyAdvertisement) {
 	discoKey := update.Key
-	c.logf("magicsock: received disco key update %v from %v", discoKey.ShortString(), node.StableID())
+	if discoKey.IsZero() {
+		c.logf("[v1] magicsock: received zero disco key update from %v", node.StableID())
+		return
+	}
+
+	c.logf("[v1] magicsock: received disco key update %v from %v", discoKey.ShortString(), node.StableID())
 	metricTSMPDiscoKeyAdvertisementReceived.Add(1)
 
 	c.mu.Lock()
@@ -4512,64 +4544,82 @@ func (c *Conn) HandleDiscoKeyAdvertisement(node tailcfg.NodeView, update packet.
 	// If the key did not change, count it and return.
 	if oldDiscoKey.Compare(discoKey) == 0 {
 		metricTSMPDiscoKeyAdvertisementUnchanged.Add(1)
-		c.logf("magicsock: disco key did not change for node %v", nodeKey.ShortString())
+		c.logf("[v1] magicsock: disco key did not change for node %v", nodeKey.ShortString())
 		return
 	}
 	c.discoInfoForKnownPeerLocked(discoKey)
 	ep.updateDiscoKey(discoKey)
 	c.peerMap.upsertEndpoint(ep, oldDiscoKey)
+	if !oldDiscoKey.IsZero() && !c.peerMap.knownPeerDiscoKey(oldDiscoKey) {
+		delete(c.discoInfo, oldDiscoKey)
+	}
 	c.logf("magicsock: updated disco key for peer %v to %v", nodeKey.ShortString(), discoKey.ShortString())
 	metricTSMPDiscoKeyAdvertisementApplied.Add(1)
 }
 
-// NewDiscoKeyAvailable is an eventbus topic that is emitted when we're sending
-// a packet to a node and observe we haven't told it our current DiscoKey before.
+// PriorityMessageForPeer is a [github.com/tailscale/wireguard-go/device.PeerPriorityMessageFunc]
+// that returns a marshaled plaintext [packet.TSMPDiscoKeyAdvertisement] if
+// nodeKey supports TSMP, otherwise it returns nil.
 //
-// The publisher is magicsock, when we're sending a packet.
-// The subscriber is userspaceEngine, which sends a TSMP packet, also via
-// magicsock. This doesn't recurse infinitely because we only publish it once per
-// DiscoKey.
-// In the common case, a DiscoKey is not rotated within a process generation
-// (as of 2026-01-21), except with debug commands to simulate process restarts.
-//
-// The address is the first node address (tailscale address) of the node. It
-// does not matter if the address is v4/v6, the receiver should handle either.
-//
-// Since we have not yet communicated with the node at the time we are
-// sending this event, the resulting TSMPDiscoKeyAdvertisement will with all
-// likelihood be transmitted via DERP.
-type NewDiscoKeyAvailable struct {
-	NodeFirstAddr netip.Addr
-	NodeID        tailcfg.NodeID
+// This callback must be cheap and must not call back into the
+// [github.com/tailscale/wireguard-go/device.Device]. The returned message must
+// not exceed [github.com/tailscale/wireguard-go/device.MaxPriorityMessageContentSize].
+func (c *Conn) PriorityMessageForPeer(nodeKey key.NodePublic) []byte {
+	disco := c.DiscoPublicKey()
+	if disco.IsZero() {
+		metricTSMPDiscoKeyAdvertisementError.Add(1)
+		return nil
+	}
+
+	c.mu.Lock()
+	self := c.self
+	ep, ok := c.peerMap.endpointForNodeKey(nodeKey)
+	c.mu.Unlock()
+	if !ok || !self.Valid() {
+		metricTSMPDiscoKeyAdvertisementError.Add(1)
+		return nil
+	}
+
+	// Do not send TSMP messages to peers that only speaks wireguard.
+	// The bool is only written once at creation of the endpoint so it is
+	// not necessary to hold the endpoint lock.
+	if ep.isWireguardOnly {
+		return nil
+	}
+
+	ep.mu.Lock()
+	dst := ep.nodeAddr
+	ep.mu.Unlock()
+
+	// Resolve our own Tailscale address in the same family as dst.
+	src := selfIPMatchingFamily(self, dst)
+	if !src.IsValid() {
+		metricTSMPDiscoKeyAdvertisementError.Add(1)
+		return nil
+	}
+
+	tdka := packet.TSMPDiscoKeyAdvertisement{Src: src, Dst: dst, Key: disco}
+	payload, err := tdka.Marshal()
+	if err != nil {
+		metricTSMPDiscoKeyAdvertisementError.Add(1)
+		return nil
+	}
+
+	// The metric is called sent, but since sending the payload is controlled by
+	// wireguard-go, we can only assume it to be sent. Thus this is an estimation
+	// of it being sent based on generation, not the actual time the message has
+	// been sent.
+	metricTSMPDiscoKeyAdvertisementSent.Add(1)
+	return payload
 }
 
-// maybeSendTSMPDiscoAdvert conditionally emits an event indicating that we
-// should send our DiscoKey to the first node address of the magicksock endpoint.
-// The event is only emitted if we are not already communicating directly and
-// more than 60 seconds has passed since the last DiscoKey was sent.
-//
-// We do not need the Conn to be locked, but the endpoint should be.
-func (c *Conn) maybeSendTSMPDiscoAdvert(de *endpoint) {
-	if !buildfeatures.HasCacheNetMap || !envknob.BoolDefaultTrue("TS_USE_CACHED_NETMAP") {
-		return
+// selfIPMatchingFamily returns self's first single-IP Tailscale address whose
+// family matches want, or the zero Addr. self must be Valid.
+func selfIPMatchingFamily(self tailcfg.NodeView, want netip.Addr) netip.Addr {
+	for _, p := range self.Addresses().All() {
+		if p.IsSingleIP() && p.Addr().BitLen() == want.BitLen() {
+			return p.Addr()
+		}
 	}
-
-	de.mu.Lock()
-	defer de.mu.Unlock()
-
-	if !de.nodeAddr.IsValid() {
-		return
-	}
-
-	now := mono.Now()
-	if now.Sub(de.lastDiscoKeyAdvertisement) <= discoKeyAdvertisementInterval ||
-		(!de.lastDiscoKeyAdvertisement.IsZero() && de.bestAddr.isDirect()) {
-		return
-	}
-
-	de.lastDiscoKeyAdvertisement = now
-	c.tsmpDiscoKeyAvailablePub.Publish(NewDiscoKeyAvailable{
-		NodeFirstAddr: de.nodeAddr,
-		NodeID:        de.nodeID,
-	})
+	return netip.Addr{}
 }
