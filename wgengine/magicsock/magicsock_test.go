@@ -643,7 +643,7 @@ func TestPickDERPFallback(t *testing.T) {
 
 	// Test that stickiness works.
 	const someNode = 123456
-	c.myDerp = someNode
+	c.setMyDerpLocked(someNode)
 	if got := c.pickDERPFallback(); got != someNode {
 		t.Errorf("not sticky: got %v; want %v", got, someNode)
 	}
@@ -3321,6 +3321,8 @@ func TestMaybeSetNearestDERP(t *testing.T) {
 		name               string
 		old                int
 		reportDERP         int
+		pref               string
+		latency            map[int]time.Duration
 		connectedToControl bool
 		force              bool
 		want               int
@@ -3383,6 +3385,63 @@ func TestMaybeSetNearestDERP(t *testing.T) {
 			connectedToControl: true,
 			want:               31, // deterministic fallback
 		},
+		{
+			name:               "pref_specific_region_beats_netcheck",
+			old:                0,
+			reportDERP:         1, // netcheck prefers region 1
+			pref:               "derp:21",
+			connectedToControl: true,
+			want:               21, // preference overrides latency-based selection
+		},
+		{
+			name:               "pref_specific_region_with_latency",
+			old:                0,
+			reportDERP:         1,
+			pref:               "derp:21,derp:31",
+			latency:            map[int]time.Duration{21: 5 * time.Millisecond},
+			connectedToControl: true,
+			want:               21, // first preferred region with latency data
+		},
+		{
+			name:               "pref_specific_region_missing_no_wildcard",
+			old:                0,
+			reportDERP:         21,        // a valid region exists, but...
+			pref:               "derp:99", // ...not in the preference
+			connectedToControl: true,
+			want:               0, // DERP disabled rather than using non-preferred region
+		},
+		{
+			name:               "pref_specific_region_missing_with_wildcard",
+			old:                0,
+			reportDERP:         21,
+			pref:               "derp:99,derp:*", // wildcard allows any region
+			connectedToControl: true,
+			want:               21, // fall back to latency-based selection
+		},
+		{
+			name:               "pref_direct_only_no_home_derp",
+			old:                0,
+			reportDERP:         21,
+			pref:               "direct",
+			connectedToControl: true,
+			want:               0, // no DERP at all
+		},
+		{
+			name:               "pref_peer_relay_only_no_home_derp",
+			old:                0,
+			reportDERP:         21,
+			pref:               "peer-relay",
+			connectedToControl: true,
+			want:               0, // no DERP at all
+		},
+		{
+			name:               "pref_specific_missing_no_wildcard_keeps_old_home",
+			old:                21,
+			reportDERP:         1,
+			pref:               "derp:99",
+			connectedToControl: true,
+			want:               0, // preference drops a non-preferred home
+		},
 	}
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3393,11 +3452,19 @@ func TestMaybeSetNearestDERP(t *testing.T) {
 			c.eventClient = ec
 			c.homeDERPChangedPub = eventbus.Publish[HomeDERPChanged](ec)
 			c.eventBus = bus
-			c.myDerp = tt.old
+			c.setMyDerpLocked(tt.old)
 			c.derpMap = derpMap
+			c.derpMapAtomic.Store(derpMap)
 			c.health = ht
+			if tt.pref != "" {
+				p, err := parseConnPref(tt.pref)
+				if err != nil {
+					t.Fatalf("parseConnPref(%q): %v", tt.pref, err)
+				}
+				c.connectionPref = p
+			}
 
-			report := &netcheck.Report{PreferredDERP: tt.reportDERP}
+			report := &netcheck.Report{PreferredDERP: tt.reportDERP, RegionLatency: tt.latency}
 
 			oldConnected := ht.GetInPollNetMap()
 			if tt.connectedToControl != oldConnected {

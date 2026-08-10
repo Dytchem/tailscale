@@ -256,9 +256,10 @@ func (p connPref) derpRegionAllowed(regionID int) bool {
 //
 // A peer's region that is not in the explicit preference list is replaced by
 // our own home DERP (myDerp) rather than connecting to a non-preferred region.
-// If DERP is entirely disallowed, or no fallback region is available, 0 is
-// returned to mean "no DERP". The default (non-explicit) preference passes the
-// peer region through unchanged.
+// If DERP is entirely disallowed, or no fallback region is available (e.g.
+// myDerp is still 0 in the early startup window before the first netcheck),
+// 0 is returned to mean "no DERP". The default (non-explicit) preference
+// passes the peer region through unchanged.
 func preferredDerpRegionForSend(pref connPref, peerRegion, myDerp int) int {
 	if !pref.explicit {
 		return peerRegion
@@ -270,6 +271,22 @@ func preferredDerpRegionForSend(pref connPref, peerRegion, myDerp int) int {
 		return myDerp
 	}
 	return peerRegion
+}
+
+// derpRegionBanned reports whether the preference forbids connecting to the
+// given DERP region entirely. The default (non-explicit) preference bans
+// nothing.
+func derpRegionBanned(pref connPref, regionID int) bool {
+	if !pref.explicit {
+		return false
+	}
+	if !pref.derpAllowed() {
+		return true
+	}
+	if len(pref.derpOrder) > 0 && !pref.derpRegionAllowed(regionID) {
+		return true
+	}
+	return false
 }
 
 // selectPreferredDERP applies DERP region ordering from the preference.

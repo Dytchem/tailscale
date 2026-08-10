@@ -431,6 +431,10 @@ type Conn struct {
 	// via setMyDerpLocked.
 	myDerpAtomic atomic.Int32
 
+	// warnedPrefRegionMissing is set once a connection-preference region
+	// was found missing from the DERP map, so the warning is logged once.
+	warnedPrefRegionMissing atomic.Bool
+
 	// checkNetworkUpDuringTests controls whether [Conn.networkDown]
 	// will report the value of [Conn.networkUp] while running tests.
 	//
@@ -644,7 +648,7 @@ func (c *Conn) onUDPRelayAllocResp(allocResp UDPRelayAllocResp) {
 	}
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
-	derpAddr := ep.derpAddr
+	derpAddr := ep.prefDerpAddrLocked()
 	if derpAddr.IsValid() {
 		go c.sendDiscoMessage(epAddr{ap: derpAddr}, ep.publicKey, disco.key, allocResp.Message, discoVerboseLog)
 	}
@@ -2648,7 +2652,11 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 	// and DERP are both disallowed (e.g. "peer-relay" only), or we have no
 	// home DERP yet, drop the PONG rather than leak a path the preference
 	// forbids.
-	if !isDerp && !dstKey.IsZero() {
+	//
+	// The check keys on the source being direct (not on dstKey): with node
+	// sharing, dstKey is zeroed for multi-node disco keys, and we still must
+	// not reply over a disallowed direct path.
+	if !isDerp {
 		pref := c.connectionPref
 		if !pref.directAllowed() && pref.derpAllowed() {
 			ourDerp := c.myDerp

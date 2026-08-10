@@ -157,7 +157,13 @@ func (c *Conn) pickDERPFallback() int {
 				return rid
 			}
 		}
-		return 0 // specific region(s) not in map, no DERP
+		if !cPref.hasAnyDERP {
+			// No preferred region exists in the map and there is no
+			// wildcard fallback: no DERP.
+			return 0
+		}
+		// No preferred region exists in the map, but the wildcard allows
+		// any region: fall through to the random selection below.
 	}
 
 	metricDERPHomeFallback.Add(1)
@@ -229,8 +235,6 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report, force bool) (preferr
 		preferredDERP = 0
 	case len(cPref.derpOrder) > 0:
 		// Specific regions are preferred over the wildcard, if any.
-		// If no preferred region is reachable and the preference only allows
-		// specific regions (no wildcard), don't fall back to any DERP.
 		dm := c.derpMapAtomic.Load()
 		regionExists := func(rid int) bool {
 			_, ok := dm.Regions[rid]
@@ -238,8 +242,14 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report, force bool) (preferr
 		}
 		if selected := cPref.selectPreferredDERP(report.RegionLatency, myDerp, regionExists); selected != 0 {
 			preferredDERP = selected
+		} else if cPref.hasAnyDERP {
+			// A wildcard ("derp:*") is in the preference: fall back to the
+			// latency-based selection (report.PreferredDERP) instead of
+			// disabling DERP.
 		} else if len(dm.Regions) > 0 {
-			c.logf("magicsock: connection preference DERP regions %v not present in DERP map; DERP disabled", cPref.derpOrder)
+			if c.warnedPrefRegionMissing.CompareAndSwap(false, true) {
+				c.logf("magicsock: connection preference DERP regions %v not present in DERP map; DERP disabled", cPref.derpOrder)
+			}
 			preferredDERP = 0
 		} else {
 			preferredDERP = 0 // no DERP map yet
@@ -409,13 +419,8 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 	// If the connection preference disallows DERP entirely, or specifies
 	// exact DERP regions and this region is not in the allowed list,
 	// don't create or use a connection.
-	if cPref := c.connectionPref; cPref.explicit {
-		if !cPref.derpAllowed() {
-			return nil
-		}
-		if len(cPref.derpOrder) > 0 && !cPref.derpRegionAllowed(regionID) {
-			return nil
-		}
+	if derpRegionBanned(c.connectionPref, regionID) {
+		return nil
 	}
 
 	// See if we have a connection open to that DERP node ID

@@ -852,7 +852,7 @@ func (r *relayManager) handleNewServerEndpointRunLoop(newServerEndpoint newRelay
 //  2. it makes a networking syscall, which can introduce unwanted backpressure
 func (r *relayManager) sendCallMeMaybeVia(ep *endpoint, se udprelay.ServerEndpoint) {
 	ep.mu.Lock()
-	derpAddr := ep.derpAddr
+	derpAddr := ep.prefDerpAddrLocked()
 	ep.mu.Unlock()
 	epDisco := ep.disco.Load()
 	if epDisco == nil || !derpAddr.IsValid() {

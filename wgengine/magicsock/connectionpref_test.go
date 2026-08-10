@@ -4,10 +4,20 @@
 package magicsock
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"tailscale.com/envknob"
 )
+
+// TestMain clears TS_CONNECTION_PREFERENCE so a developer's shell
+// environment cannot change the behavior of unrelated magicsock tests.
+func TestMain(m *testing.M) {
+	envknob.Setenv("TS_CONNECTION_PREFERENCE", "")
+	os.Exit(m.Run())
+}
 
 func TestParseConnPref_Default(t *testing.T) {
 	p, _ := parseConnPref("")
@@ -492,5 +502,34 @@ func TestParseConnPref_RegionIDBounds(t *testing.T) {
 	// Max valid region ID accepted.
 	if _, err := parseConnPref("derp:65535"); err != nil {
 		t.Errorf("derp:65535 should be accepted, got %v", err)
+	}
+}
+
+func TestDerpRegionBanned(t *testing.T) {
+	defaultPref, _ := parseConnPref("")
+	if derpRegionBanned(defaultPref, 1) {
+		t.Error("default pref should not ban any region")
+	}
+
+	derp901, _ := parseConnPref("derp:901")
+	if derpRegionBanned(derp901, 901) {
+		t.Error("allowed region 901 should not be banned")
+	}
+	if !derpRegionBanned(derp901, 902) {
+		t.Error("region 902 should be banned")
+	}
+
+	// Wildcard: any region allowed.
+	derpMix, _ := parseConnPref("derp:900,derp:*")
+	if derpRegionBanned(derpMix, 900) || derpRegionBanned(derpMix, 901) {
+		t.Error("wildcard pref should not ban any region")
+	}
+
+	// Direct-only and peer-relay-only: all regions banned.
+	for _, pref := range []string{"direct", "peer-relay"} {
+		p, _ := parseConnPref(pref)
+		if !derpRegionBanned(p, 1) {
+			t.Errorf("pref %q should ban all DERP regions", pref)
+		}
 	}
 }

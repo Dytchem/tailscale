@@ -584,13 +584,10 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 		if de.c != nil {
 			pref := de.c.connectionPref
 			if udpAddr.isDirect() && !pref.directAllowed() {
-				// Direct is disabled.
+				// Direct is disabled. Note: isDirect() implies !vni.IsSet(),
+				// so a peer-relay path can never reach this branch; it is
+				// handled below by the allowPeerRelay check.
 				if !pref.derpAllowed() {
-					// DERP is disabled too (e.g. "peer-relay" only):
-					// only a non-direct UDP path (peer relay) may be used.
-					if udpAddr.vni.IsSet() {
-						return udpAddr, netip.AddrPort{}, false
-					}
 					return epAddr{}, netip.AddrPort{}, false
 				}
 				return epAddr{}, de.prefDerpAddrLocked(), false
@@ -623,8 +620,9 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 	}
 
 	if de.isWireguardOnly {
-		// If the endpoint is wireguard-only, we don't have a DERP
-		// address to send to, so we have to send to the UDP address.
+		// WireGuard-only peers have no disco/DERP path at all, so they
+		// are exempt from the connection preference: we must send direct
+		// UDP or the peer is unreachable.
 		udpAddr, shouldPing := de.addrForWireGuardSendLocked(now)
 		return udpAddr, netip.AddrPort{}, shouldPing
 	}
@@ -1462,7 +1460,7 @@ func (de *endpoint) sendDiscoPingsLocked(now mono.Time, sendCallMeMaybe bool) {
 
 		de.startDiscoPingLocked(epAddr{ap: ep}, now, pingDiscovery, 0, nil)
 	}
-	derpAddr := de.derpAddr
+	derpAddr := de.prefDerpAddrLocked()
 	if sentAny && sendCallMeMaybe && derpAddr.IsValid() {
 		// Have our magicsock.Conn figure out its STUN endpoint (if
 		// it doesn't know already) and then send a CallMeMaybe
@@ -1865,13 +1863,16 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 
 		// If connection preference says DERP should come before direct,
 		// don't promote a direct path while a DERP path is available.
+		// Gate on prefDerpAddrLocked (the actual address the preference
+		// would send via), not on the raw peer home DERP, so the promotion
+		// decision matches the send-path decision.
 		skipPromotion := false
 		if de.c != nil && thisPong.isDirect() {
 			pref := de.c.connectionPref
 			switch {
 			case !pref.directAllowed():
 				skipPromotion = true
-			case pref.preferDERPOverDirect() && de.derpAddr.IsValid():
+			case pref.preferDERPOverDirect() && de.prefDerpAddrLocked().IsValid():
 				// DERP is the preferred method and a DERP route exists:
 				// do not promote direct at all (single-path semantics).
 				skipPromotion = true
