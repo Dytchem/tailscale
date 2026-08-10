@@ -416,13 +416,6 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 		return nil
 	}
 
-	// If the connection preference disallows DERP entirely, or specifies
-	// exact DERP regions and this region is not in the allowed list,
-	// don't create or use a connection.
-	if derpRegionBanned(c.connectionPref, regionID) {
-		return nil
-	}
-
 	// See if we have a connection open to that DERP node ID
 	// first. If so, might as well use it. (It's a little
 	// arbitrary whether we use this one vs. the reverse route
@@ -850,7 +843,7 @@ func (c *Conn) processDERPReadResult(dm derpReadResult, b []byte) (n int, ep *en
 func (c *Conn) SendDERPPacketTo(dstKey key.NodePublic, regionID int, pkt []byte) (sent bool, err error) {
 	return c.sendAddr(
 		netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(regionID)),
-		dstKey, pkt, false, false)
+		dstKey, pkt, false, false, false)
 }
 
 // SetOnlyTCP443 set whether the magicsock connection is restricted

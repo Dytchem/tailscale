@@ -1082,7 +1082,9 @@ func (de *endpoint) discoPing(res *ipnstate.PingResult, size int, cb func(*ipnst
 
 	directAllowed := true
 	relayAllowed := true
-	if de.c != nil {
+	if de.c != nil && !de.isWireguardOnly {
+		// WireGuard-only peers are exempt from the preference (they have no
+		// DERP/relay path at all); for them all UDP paths stay pingable.
 		directAllowed = de.c.connectionPref.directAllowed()
 		relayAllowed = de.c.connectionPref.allowPeerRelay()
 	}
@@ -1215,7 +1217,7 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 			buff = buff[offset:]
 			const isDisco = false
 			const isGeneveEncap = false
-			ok, _ := de.c.sendAddr(derpAddr, de.publicKey, buff, isDisco, isGeneveEncap)
+			ok, _ := de.c.sendAddr(derpAddr, de.publicKey, buff, isDisco, isGeneveEncap, false)
 			txBytes += len(buff)
 			if !ok {
 				allOk = false
@@ -1899,8 +1901,13 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 					// do not promote direct at all (single-path semantics).
 					skipPromotion = true
 				}
-			} else if thisPong.epAddr.vni.IsSet() && !pref.allowPeerRelay() {
-				skipPromotion = true
+			} else if thisPong.epAddr.vni.IsSet() {
+				// Mirror the direct-path logic for peer relay.
+				if !pref.allowPeerRelay() {
+					skipPromotion = true
+				} else if pref.preferDERPOverPeerRelay() && de.prefDerpAddrLocked().IsValid() {
+					skipPromotion = true
+				}
 			}
 		}
 

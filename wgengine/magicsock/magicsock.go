@@ -1677,12 +1677,24 @@ func (c *Conn) sendUDPStd(addr netip.AddrPort, b []byte) (sent bool, err error) 
 // An example of when they might be different: sending to an
 // IPv6 address when the local machine doesn't have IPv6 support
 // returns (false, nil); it's not an error, but nothing was sent.
-func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool) (sent bool, err error) {
+// sendAddr sends b to addr. pubKey is the key of the peer, if it is known.
+// isDisco is whether this is a discovery message. isGeneveEncap is whether b
+// is encapsulated in a Geneve header.
+//
+// allowBannedRegion permits sending DERP frames to regions the connection
+// preference forbids; it is used only for relay control-plane messages
+// (e.g. AllocateUDPRelayEndpointRequest), which must reach the relay server
+// on its home region for an otherwise-allowed peer-relay path to be usable.
+func (c *Conn) sendAddr(addr netip.AddrPort, pubKey key.NodePublic, b []byte, isDisco bool, isGeneveEncap bool, allowBannedRegion bool) (sent bool, err error) {
 	if addr.Addr() != tailcfg.DerpMagicIPAddr {
 		return c.sendUDP(addr, b, isDisco, isGeneveEncap)
 	}
 
 	regionID := int(addr.Port())
+	if !allowBannedRegion && derpRegionBanned(c.connectionPref, regionID) {
+		metricSendDERPErrorChan.Add(1)
+		return false, nil
+	}
 	ch := c.derpWriteChanForRegion(regionID, pubKey)
 	if ch == nil {
 		metricSendDERPErrorChan.Add(1)
@@ -2046,7 +2058,12 @@ func (c *Conn) sendDiscoMessage(dst epAddr, dstKey key.NodePublic, dstDisco key.
 	box := di.sharedKey.Seal(m.AppendMarshal(nil))
 	pkt = append(pkt, box...)
 	const isDisco = true
-	sent, err = c.sendAddr(dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet())
+	// Relay allocation requests are relay control-plane traffic: they must
+	// reach the relay server on its home DERP region even if the connection
+	// preference forbids that region for user traffic, otherwise an
+	// otherwise-allowed peer-relay path could never be established.
+	_, isRelayAllocReq := m.(*disco.AllocateUDPRelayEndpointRequest)
+	sent, err = c.sendAddr(dst.ap, dstKey, pkt, isDisco, dst.vni.IsSet(), isDERP && isRelayAllocReq)
 	if sent {
 		if logLevel == discoLog || (logLevel == discoVerboseLog && debugDisco()) {
 			node := "?"
@@ -2667,11 +2684,14 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 					// by the server. Direct is disallowed, so there is no
 					// compliant way to reply: drop and log instead of
 					// silently black-holing the peer's discovery.
-					c.logf("magicsock: dropping PONG to shared disco key %v (direct disallowed by connection preference)", di.discoShort)
+					c.dlogf("[v1] magicsock: dropping PONG to shared disco key %v (direct disallowed by connection preference)", di.discoShort)
 					return
 				}
 				ipDst = epAddr{ap: netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(ourDerp))}
 			} else {
+				// Startup window before the first netcheck; log once per
+				// peer rather than silently.
+				c.dlogf("[v1] magicsock: dropping PONG to %v (direct disallowed by connection preference, no home DERP yet)", di.discoShort)
 				return
 			}
 		} else if !pref.directAllowed() {

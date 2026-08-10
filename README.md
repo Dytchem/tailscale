@@ -73,6 +73,10 @@ Notes on DERP selection:
 - PINGs that arrive over a disallowed direct path get their PONG redirected
   through your home DERP; if DERP is also disallowed (e.g. `peer-relay`
   only), the PONG is dropped.
+- Peer relay control-plane traffic (relay allocation requests) may travel
+  over DERP regions that the preference forbids for user traffic: a relay
+  server is only reachable on its home region, and an otherwise-allowed
+  `peer-relay` method must be able to reach it.
 - Incoming PINGs over peer relay (Geneve) are always answered over the same
   relay path; the preference governs which paths *this* node uses.
 - WireGuard-only peers (no disco/DERP support) are exempt from the

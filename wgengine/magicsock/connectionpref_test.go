@@ -355,26 +355,6 @@ func TestParseConnPref_Whitespace(t *testing.T) {
 	}
 }
 
-func TestConnPref_PreferredDERPRegions(t *testing.T) {
-	// Any DERP => nil
-	p, _ := parseConnPref("direct,derp:*,peer-relay")
-	if got := p.preferredDERPRegions(); got != nil {
-		t.Errorf("expected nil for any DERP, got %v", got)
-	}
-
-	// Specific DERP => ordered list
-	p, _ = parseConnPref("direct,derp:901,derp:900")
-	if got := p.preferredDERPRegions(); len(got) != 2 || got[0] != 901 || got[1] != 900 {
-		t.Errorf("expected [901 900], got %v", got)
-	}
-
-	// No DERP => nil
-	p, _ = parseConnPref("direct,peer-relay")
-	if got := p.preferredDERPRegions(); got != nil {
-		t.Errorf("expected nil for no DERP, got %v", got)
-	}
-}
-
 func TestConnPref_SelectPreferredDERP_CurrentHomePreferred(t *testing.T) {
 	latency := map[int]time.Duration{
 		900: 100 * time.Millisecond,

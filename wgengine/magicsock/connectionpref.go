@@ -227,18 +227,6 @@ func (p connPref) methodPosition(method connMethod) int {
 	return 999
 }
 
-// preferredDERPRegions returns the DERP region IDs in order of preference,
-// or nil if any DERP is allowed (or default).
-func (p connPref) preferredDERPRegions() []int {
-	if p.isZero() {
-		return nil
-	}
-	if p.hasAnyDERP {
-		return nil
-	}
-	return p.derpOrder
-}
-
 // derpRegionAllowed checks whether the given DERP region ID is allowed
 // by the connection preference.
 func (p connPref) derpRegionAllowed(regionID int) bool {
