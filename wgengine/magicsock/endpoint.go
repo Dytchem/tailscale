@@ -584,7 +584,15 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 		if de.c != nil {
 			pref := de.c.connectionPref
 			if udpAddr.isDirect() && !pref.directAllowed() {
-				// Direct is disabled; use DERP only.
+				// Direct is disabled.
+				if !pref.derpAllowed() {
+					// DERP is disabled too (e.g. "peer-relay" only):
+					// only a non-direct UDP path (peer relay) may be used.
+					if udpAddr.vni.IsSet() {
+						return udpAddr, netip.AddrPort{}, false
+					}
+					return epAddr{}, netip.AddrPort{}, false
+				}
 				return epAddr{}, de.prefDerpAddrLocked(), false
 			}
 			if udpAddr.isDirect() && pref.preferDERPOverDirect() {
@@ -609,9 +617,18 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 	// If the preference only allows specific methods, don't fall back to DERP.
 	if de.c != nil {
 		pref := de.c.connectionPref
-		if udpAddr.isDirect() && !pref.derpAllowed() {
-			return udpAddr, netip.AddrPort{}, false
+		derpAddr := netip.AddrPort{}
+		if pref.derpAllowed() {
+			derpAddr = de.prefDerpAddrLocked()
 		}
+		if udpAddr.isDirect() && !pref.directAllowed() {
+			// Direct is disabled: keep only paths the preference allows.
+			if udpAddr.vni.IsSet() {
+				return udpAddr, derpAddr, false
+			}
+			return epAddr{}, derpAddr, false
+		}
+		return udpAddr, derpAddr, false
 	}
 	return udpAddr, de.prefDerpAddrLocked(), false
 }
@@ -1819,42 +1836,44 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 
 		// If connection preference says DERP should come before direct,
 		// don't promote a direct path unless we have no working path at all.
-		if de.c != nil {
+		skipPromotion := false
+		if de.c != nil && thisPong.isDirect() {
 			pref := de.c.connectionPref
-			if thisPong.isDirect() && !pref.directAllowed() {
-				goto skipPromotion
-			}
-			if thisPong.isDirect() && pref.preferDERPOverDirect() && de.derpAddr.IsValid() {
+			switch {
+			case !pref.directAllowed():
+				skipPromotion = true
+			case pref.preferDERPOverDirect() && de.derpAddr.IsValid():
 				if !de.bestAddr.ap.IsValid() && bestUntrusted {
 					de.setBestAddrLocked(thisPong)
 					de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
 				}
-				goto skipPromotion
+				skipPromotion = true
 			}
 		}
 
-		if betterAddr(thisPong, de.bestAddr) || bestUntrusted {
-			de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
-			de.debugUpdates.Add(EndpointChange{
-				When: time.Now(),
-				What: "handlePongConnLocked-bestAddr-update",
-				From: de.bestAddr,
-				To:   thisPong,
-			})
-			de.setBestAddrLocked(thisPong)
+		if !skipPromotion {
+			if betterAddr(thisPong, de.bestAddr) || bestUntrusted {
+				de.c.logf("magicsock: disco: node %v %v now using %v mtu=%v tx=%x", de.publicKey.ShortString(), de.discoShort(), sp.to, thisPong.wireMTU, m.TxID[:6])
+				de.debugUpdates.Add(EndpointChange{
+					When: time.Now(),
+					What: "handlePongConnLocked-bestAddr-update",
+					From: de.bestAddr,
+					To:   thisPong,
+				})
+				de.setBestAddrLocked(thisPong)
+			}
+			if de.bestAddr.epAddr == thisPong.epAddr {
+				de.debugUpdates.Add(EndpointChange{
+					When: time.Now(),
+					What: "handlePongConnLocked-bestAddr-latency",
+					From: de.bestAddr,
+					To:   thisPong,
+				})
+				de.bestAddr.latency = latency
+				de.bestAddrAt = now
+				de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
+			}
 		}
-		if de.bestAddr.epAddr == thisPong.epAddr {
-			de.debugUpdates.Add(EndpointChange{
-				When: time.Now(),
-				What: "handlePongConnLocked-bestAddr-latency",
-				From: de.bestAddr,
-				To:   thisPong,
-			})
-			de.bestAddr.latency = latency
-			de.bestAddrAt = now
-			de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
-		}
-	skipPromotion:
 	}
 	return
 }

@@ -215,7 +215,11 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report, force bool) (preferr
 	// If no preferred region is reachable and the preference only allows
 	// specific regions (no wildcard), don't fall back to any DERP.
 	if cPref := c.connectionPref; !cPref.hasAnyDERP && len(cPref.derpOrder) > 0 {
-		if selected := cPref.selectPreferredDERP(report.RegionLatency, c.myDerp); selected != 0 {
+		regionExists := func(rid int) bool {
+			_, ok := c.derpMap.Regions[rid]
+			return ok
+		}
+		if selected := cPref.selectPreferredDERP(report.RegionLatency, c.myDerp, regionExists); selected != 0 {
 			preferredDERP = selected
 		} else {
 			preferredDERP = 0 // no fallback when specific regions are required

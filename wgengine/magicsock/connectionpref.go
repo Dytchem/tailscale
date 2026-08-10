@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tailscale.com/envknob"
+	"tailscale.com/types/logger"
 )
 
 // connMethod is a method of connecting to a peer.
@@ -76,9 +77,12 @@ func defaultConnPref() connPref {
 //   - "peer-relay"
 //
 // Empty string returns the default preference.
-func parseConnPref(s string) connPref {
+// An invalid token returns an error and the default preference, so callers
+// can log the problem instead of silently applying a looser policy than the
+// user requested.
+func parseConnPref(s string) (connPref, error) {
 	if s == "" {
-		return defaultConnPref()
+		return defaultConnPref(), nil
 	}
 
 	var p connPref
@@ -89,7 +93,7 @@ func parseConnPref(s string) connPref {
 		}
 		entry, err := parseConnPrefToken(token)
 		if err != nil {
-			return defaultConnPref()
+			return defaultConnPref(), fmt.Errorf("invalid TS_CONNECTION_PREFERENCE token %q: %w", token, err)
 		}
 		p.entries = append(p.entries, entry)
 		switch entry.method {
@@ -114,9 +118,9 @@ func parseConnPref(s string) connPref {
 		}
 	}
 	if len(p.entries) == 0 {
-		return defaultConnPref()
+		return defaultConnPref(), nil
 	}
-	return p
+	return p, nil
 }
 
 func parseConnPrefToken(token string) (connPrefEntry, error) {
@@ -143,10 +147,15 @@ func parseConnPrefToken(token string) (connPrefEntry, error) {
 var debugConnectionPreference = envknob.RegisterString("TS_CONNECTION_PREFERENCE")
 
 // getConnPref returns the parsed connection preference from the environment.
-// It is safe for concurrent use.
-func getConnPref() connPref {
+// If the preference string is invalid, the default (all methods allowed)
+// preference is returned and the problem is logged.
+func getConnPref(logf logger.Logf) connPref {
 	s := debugConnectionPreference()
-	return parseConnPref(s)
+	p, err := parseConnPref(s)
+	if err != nil {
+		logf("[unexpected] %v; using default connection preference", err)
+	}
+	return p
 }
 
 // isZero reports whether p is the zero value (uninitialized).
@@ -232,13 +241,18 @@ func (p connPref) derpRegionAllowed(regionID int) bool {
 }
 
 // selectPreferredDERP applies DERP region ordering from the preference.
-// Given the region latency map and current home DERP, it returns the best
+// Given the region latency map, the current home DERP, and a predicate that
+// reports whether a region ID exists in the DERP map, it returns the best
 // DERP region according to the preference, or 0 to let existing logic decide.
 //
 // The preference can have both specific regions (e.g. "derp:900") and
-// a catch-all "derp:*". This function handles the case where specific
-// regions should be preferred over the wildcard.
-func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, currentHome int) int {
+// a catch-all "derp:*". Specific regions are always preferred over the
+// wildcard, regardless of their position in the list.
+//
+// A region is only ever returned if regionExists reports true for it;
+// force-connecting to a region ID absent from the DERP map would select a
+// home DERP that drops all traffic.
+func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, currentHome int, regionExists func(int) bool) int {
 	if p.isZero() {
 		return 0 // let existing logic handle it
 	}
@@ -251,7 +265,7 @@ func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, curre
 		// Current home: keep if it's in our preferred list and reachable.
 		for _, rid := range p.derpOrder {
 			if rid == currentHome {
-				if _, ok := regionLatency[rid]; ok {
+				if _, ok := regionLatency[rid]; ok && regionExists(rid) {
 					return rid
 				}
 			}
@@ -259,19 +273,27 @@ func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, curre
 
 		// Find the first preferred region with latency data.
 		for _, rid := range p.derpOrder {
-			if _, ok := regionLatency[rid]; ok {
+			if _, ok := regionLatency[rid]; ok && regionExists(rid) {
 				return rid
 			}
 		}
 
 		// No specific preferred region is reachable; try current home as last resort.
-		if currentHome != 0 && p.derpRegion[currentHome] {
+		if currentHome != 0 && p.derpRegion[currentHome] && regionExists(currentHome) {
 			return currentHome
 		}
 
-		// Even without latency data, force-connect to the first preferred region.
-		// The STUN probe might have failed (UDP blocked) but TCP DERP may still work.
-		return p.derpOrder[0]
+		// Even without latency data, force-connect to the first preferred
+		// region that exists. The STUN probe might have failed (UDP blocked)
+		// but TCP DERP may still work.
+		for _, rid := range p.derpOrder {
+			if regionExists(rid) {
+				return rid
+			}
+		}
+
+		// No preferred region exists in the DERP map; do not select any DERP.
+		return 0
 	}
 
 	// If we have "any DERP" as fallback, return 0 to let existing netcheck logic decide.

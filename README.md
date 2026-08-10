@@ -48,6 +48,18 @@ tailscaled --connection-preference=derp:902,derp:*,direct
 Comma-separated ordered list. When a single method is specified, no fallback
 to other methods occurs. Multiple methods create a priority chain.
 
+Notes on DERP selection:
+
+- Specific regions (`derp:<id>`) are always preferred over the wildcard
+  (`derp:*`), regardless of their position in the list. The wildcard is a
+  fallback for any region not explicitly listed.
+- A region is only ever selected if it exists in the DERP map the control
+  server advertised; a nonexistent region ID will never be force-connected to
+  (which would drop all traffic).
+- An invalid token in the list logs an error and falls back to the default
+  (all methods allowed) preference, so a typo is loud instead of silently
+  restricting to nothing.
+
 ### Example: Force DERP 902 only
 
 ```

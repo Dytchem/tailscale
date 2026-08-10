@@ -9,7 +9,7 @@ import (
 )
 
 func TestParseConnPref_Default(t *testing.T) {
-	p := parseConnPref("")
+	p, _ := parseConnPref("")
 	if len(p.entries) != 3 {
 		t.Errorf("expected 3 entries, got %d", len(p.entries))
 	}
@@ -25,7 +25,7 @@ func TestParseConnPref_Default(t *testing.T) {
 }
 
 func TestParseConnPref_DirectOnly(t *testing.T) {
-	p := parseConnPref("direct")
+	p, _ := parseConnPref("direct")
 	if len(p.entries) != 1 {
 		t.Errorf("expected 1 entry, got %d", len(p.entries))
 	}
@@ -47,7 +47,7 @@ func TestParseConnPref_DirectOnly(t *testing.T) {
 }
 
 func TestParseConnPref_SpecificDERP(t *testing.T) {
-	p := parseConnPref("direct,derp:900,derp:901,derp:*,peer-relay")
+	p, _ := parseConnPref("direct,derp:900,derp:901,derp:*,peer-relay")
 	if len(p.entries) != 5 {
 		t.Errorf("expected 5 entries, got %d", len(p.entries))
 	}
@@ -69,7 +69,7 @@ func TestParseConnPref_SpecificDERP(t *testing.T) {
 }
 
 func TestParseConnPref_DERPOnly(t *testing.T) {
-	p := parseConnPref("derp:999,derp:*")
+	p, _ := parseConnPref("derp:999,derp:*")
 	if p.hasDirect {
 		t.Error("expected hasDirect=false")
 	}
@@ -85,8 +85,11 @@ func TestParseConnPref_DERPOnly(t *testing.T) {
 }
 
 func TestParseConnPref_InvalidToken(t *testing.T) {
-	p := parseConnPref("direct,invalid-token,derp:*")
-	// Should fallback to default on invalid token
+	p, err := parseConnPref("direct,invalid-token,derp:*")
+	// Invalid token: error is returned and preference falls back to default.
+	if err == nil {
+		t.Error("expected error for invalid token")
+	}
 	if len(p.entries) != 3 {
 		t.Errorf("expected default 3 entries, got %d", len(p.entries))
 	}
@@ -96,14 +99,17 @@ func TestParseConnPref_InvalidToken(t *testing.T) {
 }
 
 func TestParseConnPref_InvalidDERPID(t *testing.T) {
-	p := parseConnPref("direct,derp:abc,derp:*")
+	p, err := parseConnPref("direct,derp:abc,derp:*")
+	if err == nil {
+		t.Error("expected error for invalid DERP ID")
+	}
 	if len(p.entries) != 3 {
 		t.Errorf("expected default 3 entries, got %d", len(p.entries))
 	}
 }
 
 func TestParseConnPref_DuplicateDERPRegions(t *testing.T) {
-	p := parseConnPref("derp:900,derp:900,derp:901")
+	p, _ := parseConnPref("derp:900,derp:900,derp:901")
 	if len(p.derpOrder) != 2 {
 		t.Errorf("expected 2 unique regions, got %v", p.derpOrder)
 	}
@@ -113,7 +119,7 @@ func TestParseConnPref_DuplicateDERPRegions(t *testing.T) {
 }
 
 func TestConnPref_MethodPosition(t *testing.T) {
-	p := parseConnPref("direct,derp:999,peer-relay")
+	p, _ := parseConnPref("direct,derp:999,peer-relay")
 	if pos := p.methodPosition(connMethodDirect); pos != 0 {
 		t.Errorf("direct position: want 0, got %d", pos)
 	}
@@ -127,62 +133,62 @@ func TestConnPref_MethodPosition(t *testing.T) {
 
 func TestConnPref_PreferDERPOverDirect(t *testing.T) {
 	// Default: direct before DERP
-	if p := parseConnPref(""); p.preferDERPOverDirect() {
+	if p, _ := parseConnPref(""); p.preferDERPOverDirect() {
 		t.Error("default should not prefer DERP over direct")
 	}
 	// Direct before DERP
-	if p := parseConnPref("direct,derp:*"); p.preferDERPOverDirect() {
+	if p, _ := parseConnPref("direct,derp:*"); p.preferDERPOverDirect() {
 		t.Error("direct before derp should not prefer DERP")
 	}
 	// DERP before direct
-	if p := parseConnPref("derp:*,direct"); !p.preferDERPOverDirect() {
+	if p, _ := parseConnPref("derp:*,direct"); !p.preferDERPOverDirect() {
 		t.Error("derp before direct should prefer DERP")
 	}
 	// No direct at all
-	if p := parseConnPref("derp:*,peer-relay"); !p.preferDERPOverDirect() {
+	if p, _ := parseConnPref("derp:*,peer-relay"); !p.preferDERPOverDirect() {
 		t.Error("no direct should prefer DERP over direct")
 	}
 }
 
 func TestConnPref_PreferDERPOverPeerRelay(t *testing.T) {
 	// Default: DERP before peer-relay
-	if p := parseConnPref(""); !p.preferDERPOverPeerRelay() {
+	if p, _ := parseConnPref(""); !p.preferDERPOverPeerRelay() {
 		t.Error("default should prefer DERP over peer-relay")
 	}
 	// Peer-relay before DERP
-	if p := parseConnPref("peer-relay,derp:*"); p.preferDERPOverPeerRelay() {
+	if p, _ := parseConnPref("peer-relay,derp:*"); p.preferDERPOverPeerRelay() {
 		t.Error("peer-relay before derp should not prefer DERP")
 	}
 	// DERP before peer-relay
-	if p := parseConnPref("derp:*,peer-relay"); !p.preferDERPOverPeerRelay() {
+	if p, _ := parseConnPref("derp:*,peer-relay"); !p.preferDERPOverPeerRelay() {
 		t.Error("derp before peer-relay should prefer DERP")
 	}
 	// No DERP at all
-	if p := parseConnPref("peer-relay"); p.preferDERPOverPeerRelay() {
+	if p, _ := parseConnPref("peer-relay"); p.preferDERPOverPeerRelay() {
 		t.Error("no DERP should not prefer DERP over peer-relay")
 	}
 }
 
 func TestConnPref_DirectAllowed(t *testing.T) {
-	if p := parseConnPref("derp:*,peer-relay"); p.directAllowed() {
+	if p, _ := parseConnPref("derp:*,peer-relay"); p.directAllowed() {
 		t.Error("direct should not be allowed when not in list")
 	}
-	if p := parseConnPref("direct,derp:*"); !p.directAllowed() {
+	if p, _ := parseConnPref("direct,derp:*"); !p.directAllowed() {
 		t.Error("direct should be allowed when in list")
 	}
 }
 
 func TestConnPref_AllowPeerRelay(t *testing.T) {
-	if p := parseConnPref("direct,derp:*"); p.allowPeerRelay() {
+	if p, _ := parseConnPref("direct,derp:*"); p.allowPeerRelay() {
 		t.Error("peer-relay should not be allowed when not in list")
 	}
-	if p := parseConnPref("direct,derp:*,peer-relay"); !p.allowPeerRelay() {
+	if p, _ := parseConnPref("direct,derp:*,peer-relay"); !p.allowPeerRelay() {
 		t.Error("peer-relay should be allowed when in list")
 	}
 }
 
 func TestConnPref_DERPRegionAllowed(t *testing.T) {
-	p := parseConnPref("derp:900,derp:901,derp:*")
+	p, _ := parseConnPref("derp:900,derp:901,derp:*")
 	if !p.derpRegionAllowed(1) {
 		t.Error("any DERP should allow region 1")
 	}
@@ -190,7 +196,7 @@ func TestConnPref_DERPRegionAllowed(t *testing.T) {
 		t.Error("any DERP should allow region 900")
 	}
 
-	p = parseConnPref("derp:900,derp:901,direct")
+	p, _ = parseConnPref("derp:900,derp:901,direct")
 	if p.derpRegionAllowed(1) {
 		t.Error("region 1 should not be allowed")
 	}
@@ -210,32 +216,32 @@ func TestConnPref_SelectPreferredDERP(t *testing.T) {
 	}
 
 	// With any DERP (no specific regions), selectPreferredDERP returns 0 (let existing logic decide)
-	p := parseConnPref("direct,derp:*,peer-relay")
-	if selected := p.selectPreferredDERP(latency, 0); selected != 0 {
+	p, _ := parseConnPref("direct,derp:*,peer-relay")
+	if selected := p.selectPreferredDERP(latency, 0, func(int) bool { return true }); selected != 0 {
 		t.Errorf("expected 0 for any DERP, got %d", selected)
 	}
 
 	// With specific ordering (no derp:*), should pick first preferred with latency data
-	p = parseConnPref("direct,derp:901,derp:900,peer-relay")
-	if selected := p.selectPreferredDERP(latency, 0); selected != 901 {
+	p, _ = parseConnPref("direct,derp:901,derp:900,peer-relay")
+	if selected := p.selectPreferredDERP(latency, 0, func(int) bool { return true }); selected != 901 {
 		t.Errorf("expected 901 as first preferred, got %d", selected)
 	}
 
 	// Should keep current home if it's in the preferred list
-	if selected := p.selectPreferredDERP(latency, 900); selected != 900 {
+	if selected := p.selectPreferredDERP(latency, 900, func(int) bool { return true }); selected != 900 {
 		t.Errorf("expected 900 as current home, got %d", selected)
 	}
 
 	// If no preferred region has latency, force-connect to the first preferred region
 	emptyLatency := map[int]time.Duration{}
-	if selected := p.selectPreferredDERP(emptyLatency, 0); selected != 901 {
+	if selected := p.selectPreferredDERP(emptyLatency, 0, func(int) bool { return true }); selected != 901 {
 		t.Errorf("expected 901 as forced first region, got %d", selected)
 	}
 
 	// With specific ordering AND derp:* fallback: specific regions are checked first,
 	// then if none match, 0 is returned to let existing logic handle the wildcard.
-	p = parseConnPref("direct,derp:901,derp:900,derp:*,peer-relay")
-	if selected := p.selectPreferredDERP(latency, 0); selected != 901 {
+	p, _ = parseConnPref("direct,derp:901,derp:900,derp:*,peer-relay")
+	if selected := p.selectPreferredDERP(latency, 0, func(int) bool { return true }); selected != 901 {
 		t.Errorf("expected 901 as first preferred (with wildcard fallback), got %d", selected)
 	}
 }
@@ -246,8 +252,8 @@ func TestConnPref_SelectPreferredDERP_CurrentHomeFallback(t *testing.T) {
 	}
 
 	// Current home is in preferred list but not in latency map; should still try it
-	p := parseConnPref("direct,derp:900,peer-relay")
-	if selected := p.selectPreferredDERP(latency, 900); selected != 900 {
+	p, _ := parseConnPref("direct,derp:900,peer-relay")
+	if selected := p.selectPreferredDERP(latency, 900, func(int) bool { return true }); selected != 900 {
 		t.Errorf("expected 900 as current home fallback, got %d", selected)
 	}
 }
@@ -317,7 +323,7 @@ func TestConnPref_EndToEndScenarios(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := parseConnPref(tt.pref)
+			p, _ := parseConnPref(tt.pref)
 			if !tt.checkFn(p) {
 				t.Errorf("check failed for pref=%q", tt.pref)
 				t.Logf("  entries=%d, hasDirect=%v, hasAnyDERP=%v, hasPeerRelay=%v, derpOrder=%v",
@@ -328,7 +334,7 @@ func TestConnPref_EndToEndScenarios(t *testing.T) {
 }
 
 func TestParseConnPref_Whitespace(t *testing.T) {
-	p := parseConnPref(" direct , derp:999 , peer-relay ")
+	p, _ := parseConnPref(" direct , derp:999 , peer-relay ")
 	if len(p.entries) != 3 {
 		t.Errorf("expected 3 entries with whitespace, got %d", len(p.entries))
 	}
@@ -336,19 +342,19 @@ func TestParseConnPref_Whitespace(t *testing.T) {
 
 func TestConnPref_PreferredDERPRegions(t *testing.T) {
 	// Any DERP => nil
-	p := parseConnPref("direct,derp:*,peer-relay")
+	p, _ := parseConnPref("direct,derp:*,peer-relay")
 	if got := p.preferredDERPRegions(); got != nil {
 		t.Errorf("expected nil for any DERP, got %v", got)
 	}
 
 	// Specific DERP => ordered list
-	p = parseConnPref("direct,derp:901,derp:900")
+	p, _ = parseConnPref("direct,derp:901,derp:900")
 	if got := p.preferredDERPRegions(); len(got) != 2 || got[0] != 901 || got[1] != 900 {
 		t.Errorf("expected [901 900], got %v", got)
 	}
 
 	// No DERP => nil
-	p = parseConnPref("direct,peer-relay")
+	p, _ = parseConnPref("direct,peer-relay")
 	if got := p.preferredDERPRegions(); got != nil {
 		t.Errorf("expected nil for no DERP, got %v", got)
 	}
@@ -359,9 +365,74 @@ func TestConnPref_SelectPreferredDERP_CurrentHomePreferred(t *testing.T) {
 		900: 100 * time.Millisecond,
 		901: 5 * time.Millisecond,
 	}
-	p := parseConnPref("direct,derp:900,derp:901,peer-relay")
+	p, _ := parseConnPref("direct,derp:900,derp:901,peer-relay")
 	// Current home is 900, which is preferred over 901 even though 901 has lower latency
-	if selected := p.selectPreferredDERP(latency, 900); selected != 900 {
+	if selected := p.selectPreferredDERP(latency, 900, func(int) bool { return true }); selected != 900 {
 		t.Errorf("expected current home 900, got %d", selected)
+	}
+}
+
+func TestConnPref_SelectPreferredDERP_RegionExists(t *testing.T) {
+	latency := map[int]time.Duration{
+		900: 10 * time.Millisecond,
+	}
+	p, _ := parseConnPref("derp:900,derp:901")
+
+	// 900 has latency and exists: selected.
+	if selected := p.selectPreferredDERP(latency, 0, func(rid int) bool { return rid == 900 }); selected != 900 {
+		t.Errorf("expected 900, got %d", selected)
+	}
+
+	// Only 901 exists in the DERP map but has no latency data: still selected.
+	if selected := p.selectPreferredDERP(latency, 0, func(rid int) bool { return rid == 901 }); selected != 901 {
+		t.Errorf("expected 901 (exists, forced), got %d", selected)
+	}
+
+	// Neither preferred region exists in the DERP map: must NOT force-connect.
+	if selected := p.selectPreferredDERP(latency, 0, func(int) bool { return false }); selected != 0 {
+		t.Errorf("expected 0 when no preferred region exists, got %d", selected)
+	}
+
+	// Current home not preferred and does not exist: no selection.
+	if selected := p.selectPreferredDERP(latency, 902, func(rid int) bool { return rid == 901 }); selected != 901 {
+		t.Errorf("expected 901, got %d", selected)
+	}
+}
+
+func TestConnPref_PeerRelayOnly(t *testing.T) {
+	p, _ := parseConnPref("peer-relay")
+	if p.directAllowed() {
+		t.Error("direct should not be allowed")
+	}
+	if p.derpAllowed() {
+		t.Error("derp should not be allowed")
+	}
+	if !p.allowPeerRelay() {
+		t.Error("peer-relay should be allowed")
+	}
+	if p.preferDERPOverDirect() {
+		t.Error("should not prefer DERP over direct")
+	}
+	if p.preferDERPOverPeerRelay() {
+		t.Error("should not prefer DERP over peer-relay")
+	}
+}
+
+func TestConnPref_DerpOnly(t *testing.T) {
+	p, _ := parseConnPref("derp:901")
+	if p.directAllowed() {
+		t.Error("direct should not be allowed")
+	}
+	if !p.derpAllowed() {
+		t.Error("derp should be allowed")
+	}
+	if p.allowPeerRelay() {
+		t.Error("peer-relay should not be allowed")
+	}
+	if !p.derpRegionAllowed(901) {
+		t.Error("region 901 should be allowed")
+	}
+	if p.derpRegionAllowed(902) {
+		t.Error("region 902 should not be allowed")
 	}
 }
