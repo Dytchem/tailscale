@@ -2235,7 +2235,9 @@ func (de *endpoint) numStopAndReset() int64 {
 //
 // de.mu must be held. If de.c is nil, returns de.derpAddr.
 func (de *endpoint) prefDerpAddrLocked() netip.AddrPort {
-	if de.c == nil {
+	if de.c == nil || !de.c.connectionPref.explicit {
+		// Default (non-explicit) preference must behave exactly like
+		// upstream: pass the peer's home DERP through unchanged.
 		return de.derpAddr
 	}
 	dm := de.c.derpMapAtomic.Load()
