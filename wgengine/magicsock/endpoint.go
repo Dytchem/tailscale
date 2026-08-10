@@ -1047,10 +1047,17 @@ func (de *endpoint) discoPing(res *ipnstate.PingResult, size int, cb func(*ipnst
 		de.startDiscoPingLocked(epAddr{ap: derpAddr}, now, pingCLI, size, resCB)
 	}
 
+	directAllowed := true
+	if de.c != nil {
+		directAllowed = de.c.connectionPref.directAllowed()
+	}
+
 	switch {
 	case udpAddr.ap.IsValid() && now.Before(de.trustBestAddrUntil):
 		// We have a "trusted" direct OR peer relay address, ping it.
-		de.startDiscoPingLocked(udpAddr, now, pingCLI, size, resCB)
+		if directAllowed || udpAddr.vni.IsSet() {
+			de.startDiscoPingLocked(udpAddr, now, pingCLI, size, resCB)
+		}
 		if !udpAddr.vni.IsSet() {
 			// If the path is direct we do not want to fallthrough to pinging
 			// all candidate direct paths, otherwise "tailscale ping" results to
@@ -1071,8 +1078,10 @@ func (de *endpoint) discoPing(res *ipnstate.PingResult, size int, cb func(*ipnst
 		// [de.discoveryUDPRelayPathsLocked], but a user-initiated [pingCLI] is
 		// a "do it now" operation that should not be subject to
 		// [heartbeatInterval] tick or [discoPingInterval] rate-limiting.
-		for ep := range de.endpointState {
-			de.startDiscoPingLocked(epAddr{ap: ep}, now, pingCLI, size, resCB)
+		if directAllowed {
+			for ep := range de.endpointState {
+				de.startDiscoPingLocked(epAddr{ap: ep}, now, pingCLI, size, resCB)
+			}
 		}
 		if de.wantUDPRelayPathDiscoveryLocked(now) {
 			de.discoverUDPRelayPathsLocked(now)
