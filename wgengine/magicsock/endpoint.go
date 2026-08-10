@@ -578,9 +578,9 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 	udpAddr = de.bestAddr.epAddr
 
 	if udpAddr.ap.IsValid() && !now.After(de.trustBestAddrUntil) {
-		// We have a trusted UDP path. But if the connection preference
-		// says DERP should be preferred over this type of path, include
-		// DERP as well (or skip UDP entirely).
+		// We have a trusted UDP path. If the connection preference says a
+		// preferred method exists, use it as a single path instead of
+		// dual-sending (upstream behavior for trusted paths is single-send).
 		if de.c != nil {
 			pref := de.c.connectionPref
 			if udpAddr.isDirect() && !pref.directAllowed() {
@@ -595,11 +595,28 @@ func (de *endpoint) addrForSendLocked(now mono.Time) (udpAddr epAddr, derpAddr n
 				}
 				return epAddr{}, de.prefDerpAddrLocked(), false
 			}
-			if udpAddr.isDirect() && pref.preferDERPOverDirect() {
-				return udpAddr, de.prefDerpAddrLocked(), false
+			if udpAddr.vni.IsSet() && !pref.allowPeerRelay() {
+				// Peer relay is disabled; use DERP if allowed.
+				if !pref.derpAllowed() {
+					return epAddr{}, netip.AddrPort{}, false
+				}
+				return epAddr{}, de.prefDerpAddrLocked(), false
 			}
-			if udpAddr.vni.IsSet() && pref.preferDERPOverPeerRelay() {
-				return udpAddr, de.prefDerpAddrLocked(), false
+			if pref.preferDERPOverDirect() && udpAddr.isDirect() {
+				// DERP preferred over direct: use DERP, fall back to the
+				// direct path only if no DERP address is available.
+				if derpAddr := de.prefDerpAddrLocked(); derpAddr.IsValid() {
+					return epAddr{}, derpAddr, false
+				}
+				return udpAddr, netip.AddrPort{}, false
+			}
+			if pref.preferDERPOverPeerRelay() && udpAddr.vni.IsSet() {
+				// DERP preferred over peer relay: use DERP, fall back to
+				// the relay path only if no DERP address is available.
+				if derpAddr := de.prefDerpAddrLocked(); derpAddr.IsValid() {
+					return epAddr{}, derpAddr, false
+				}
+				return udpAddr, netip.AddrPort{}, false
 			}
 		}
 		return udpAddr, netip.AddrPort{}, false
@@ -715,14 +732,14 @@ func (de *endpoint) addrForPingSizeLocked(now mono.Time, size int) (udpAddr epAd
 		}
 		// We had a bestAddr with large enough MTU but it expired, so
 		// send both to it and DERP.
-		return udpAddr, de.derpAddr
+		return udpAddr, de.prefDerpAddrLocked()
 	}
 
 	// The UDP address isn't valid or it doesn't have a path MTU big enough
 	// for the packet. Return a zero-value udpAddr to signal that we should
 	// keep probing the path MTU to all addresses for this endpoint, and a
 	// valid DERP addr to signal that we should also send via DERP.
-	return epAddr{}, de.derpAddr
+	return epAddr{}, de.prefDerpAddrLocked()
 }
 
 // maybeProbeUDPLifetimeLocked returns an afterInactivityFor duration and true
@@ -1125,8 +1142,11 @@ func (de *endpoint) send(buffs [][]byte, offset int) error {
 		// their DERP home, we can at least assume they're reachable over the
 		// DERP they used to contact us.
 		if rid := de.c.fallbackDERPRegionForPeer(de.publicKey); rid != 0 {
-			derpAddr = netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(rid))
-		} else {
+			if rid := preferredDerpRegionForSend(de.c.connectionPref, rid, int(de.c.myDerpAtomic.Load())); rid != 0 {
+				derpAddr = netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(rid))
+			}
+		}
+		if !derpAddr.IsValid() {
 			return errNoUDPOrDERP
 		}
 	}
@@ -1844,7 +1864,7 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 		bestUntrusted := now.After(de.trustBestAddrUntil)
 
 		// If connection preference says DERP should come before direct,
-		// don't promote a direct path unless we have no working path at all.
+		// don't promote a direct path while a DERP path is available.
 		skipPromotion := false
 		if de.c != nil && thisPong.isDirect() {
 			pref := de.c.connectionPref
@@ -1852,10 +1872,8 @@ func (de *endpoint) handlePongConnLocked(m *disco.Pong, di *discoInfo, src epAdd
 			case !pref.directAllowed():
 				skipPromotion = true
 			case pref.preferDERPOverDirect() && de.derpAddr.IsValid():
-				if !de.bestAddr.ap.IsValid() && bestUntrusted {
-					de.setBestAddrLocked(thisPong)
-					de.trustBestAddrUntil = now.Add(trustUDPAddrDuration)
-				}
+				// DERP is the preferred method and a DERP route exists:
+				// do not promote direct at all (single-path semantics).
 				skipPromotion = true
 			}
 		}
@@ -2183,20 +2201,11 @@ func (de *endpoint) prefDerpAddrLocked() netip.AddrPort {
 	if de.c == nil {
 		return de.derpAddr
 	}
-	pref := de.c.connectionPref
-	if pref.hasAnyDERP || len(pref.derpOrder) == 0 {
-		return de.derpAddr
+	rid := preferredDerpRegionForSend(de.c.connectionPref, int(de.derpAddr.Port()), int(de.c.myDerpAtomic.Load()))
+	if rid == 0 {
+		return netip.AddrPort{}
 	}
-	peerRegion := int(de.derpAddr.Port())
-	if pref.derpRegionAllowed(peerRegion) {
-		return de.derpAddr
-	}
-	// Peer's home DERP is not in our preferred list; use our own home DERP.
-	ourDerp := de.c.myDerp
-	if ourDerp != 0 {
-		return netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(ourDerp))
-	}
-	return de.derpAddr
+	return netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(rid))
 }
 
 func (de *endpoint) setDERPHome(regionID uint16) {

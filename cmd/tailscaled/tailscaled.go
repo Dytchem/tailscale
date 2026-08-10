@@ -270,7 +270,15 @@ store state on filesystem.`)
 		f() // redirects the default logger (e.g. to syslog) if requested by flags
 	}
 
-	if args.connectionPreference != "" {
+	// The flag wins over the environment variable; an explicitly empty
+	// --connection-preference resets any TS_CONNECTION_PREFERENCE.
+	prefFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "connection-preference" {
+			prefFlagSet = true
+		}
+	})
+	if prefFlagSet {
 		envknob.Setenv("TS_CONNECTION_PREFERENCE", args.connectionPreference)
 	}
 

@@ -426,6 +426,11 @@ type Conn struct {
 	// the priority ordering of direct UDP, DERP regions, and peer relay.
 	connectionPref connPref
 
+	// myDerpAtomic mirrors myDerp for lock-free reads from paths that hold
+	// an endpoint lock (de.mu) rather than c.mu. Writes happen under c.mu
+	// via setMyDerpLocked.
+	myDerpAtomic atomic.Int32
+
 	// checkNetworkUpDuringTests controls whether [Conn.networkDown]
 	// will report the value of [Conn.networkUp] while running tests.
 	//
@@ -2637,20 +2642,24 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 	ipDst := src
 	discoDest := di.discoKey
 
-	// If the connection preference only allows DERP (not direct),
-	// redirect the PONG reply through DERP even if the PING came via direct.
-	// Use our home DERP (not the peer's) to avoid non-preferred regions.
-	// If we have no home DERP yet, drop the PONG rather than leak a direct
-	// path the preference forbids.
+	// If the connection preference only allows DERP (not direct), redirect
+	// the PONG reply through DERP even if the PING came via direct. Use our
+	// home DERP (not the peer's) to avoid non-preferred regions. If direct
+	// and DERP are both disallowed (e.g. "peer-relay" only), or we have no
+	// home DERP yet, drop the PONG rather than leak a path the preference
+	// forbids.
 	if !isDerp && !dstKey.IsZero() {
 		pref := c.connectionPref
-		if !pref.directAllowed() {
+		if !pref.directAllowed() && pref.derpAllowed() {
 			ourDerp := c.myDerp
 			if ourDerp != 0 {
 				ipDst = epAddr{ap: netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(ourDerp))}
 			} else {
 				return
 			}
+		} else if !pref.directAllowed() {
+			// Both direct and DERP are disallowed; do not reply over either.
+			return
 		}
 	}
 
@@ -4023,7 +4032,7 @@ func (c *Conn) SetHomeless(v bool) {
 
 	if v && c.myDerp != 0 {
 		oldHome := c.myDerp
-		c.myDerp = 0
+		c.setMyDerpLocked(0)
 		c.closeDerpLocked(oldHome, "set-homeless")
 	}
 	if !v {

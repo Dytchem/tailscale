@@ -4,6 +4,7 @@
 package magicsock
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -151,9 +152,9 @@ func TestConnPref_PreferDERPOverDirect(t *testing.T) {
 }
 
 func TestConnPref_PreferDERPOverPeerRelay(t *testing.T) {
-	// Default: DERP before peer-relay
-	if p, _ := parseConnPref(""); !p.preferDERPOverPeerRelay() {
-		t.Error("default should prefer DERP over peer-relay")
+	// Default: no reordering of trusted paths (matches upstream behavior).
+	if p, _ := parseConnPref(""); p.preferDERPOverPeerRelay() {
+		t.Error("default should not prefer DERP over peer-relay (upstream behavior)")
 	}
 	// Peer-relay before DERP
 	if p, _ := parseConnPref("peer-relay,derp:*"); p.preferDERPOverPeerRelay() {
@@ -434,5 +435,62 @@ func TestConnPref_DerpOnly(t *testing.T) {
 	}
 	if p.derpRegionAllowed(902) {
 		t.Error("region 902 should not be allowed")
+	}
+}
+
+func TestPreferredDerpRegionForSend(t *testing.T) {
+	defaultPref, _ := parseConnPref("")
+	if got := preferredDerpRegionForSend(defaultPref, 1, 0); got != 1 {
+		t.Errorf("default pref: want peer region 1, got %d", got)
+	}
+
+	derp901, _ := parseConnPref("derp:901")
+	// Peer region in preference list: unchanged.
+	if got := preferredDerpRegionForSend(derp901, 901, 901); got != 901 {
+		t.Errorf("allowed region: want 901, got %d", got)
+	}
+	// Peer region NOT in list: replaced by our home.
+	if got := preferredDerpRegionForSend(derp901, 902, 901); got != 901 {
+		t.Errorf("non-allowed peer region: want our home 901, got %d", got)
+	}
+	// No home DERP available: no DERP.
+	if got := preferredDerpRegionForSend(derp901, 902, 0); got != 0 {
+		t.Errorf("no home: want 0, got %d", got)
+	}
+
+	// Specific + wildcard: specific regions win over wildcard.
+	derpMix, _ := parseConnPref("derp:900,derp:*")
+	if got := preferredDerpRegionForSend(derpMix, 900, 900); got != 900 {
+		t.Errorf("specific region: want 900, got %d", got)
+	}
+	// A wildcard-covered peer region is allowed as-is.
+	if got := preferredDerpRegionForSend(derpMix, 901, 900); got != 901 {
+		t.Errorf("wildcard-covered peer region: want 901, got %d", got)
+	}
+
+	// Direct-only: DERP entirely disallowed.
+	directOnly, _ := parseConnPref("direct")
+	if got := preferredDerpRegionForSend(directOnly, 1, 1); got != 0 {
+		t.Errorf("direct-only: want 0, got %d", got)
+	}
+
+	// Peer-relay only: DERP entirely disallowed.
+	relayOnly, _ := parseConnPref("peer-relay")
+	if got := preferredDerpRegionForSend(relayOnly, 1, 1); got != 0 {
+		t.Errorf("peer-relay-only: want 0, got %d", got)
+	}
+}
+
+func TestParseConnPref_RegionIDBounds(t *testing.T) {
+	// 0, negative, and out-of-uint16-range region IDs are rejected.
+	for _, tok := range []string{"derp:0", "derp:-1", "derp:70000", "derp:65536", "derp:abc"} {
+		p, err := parseConnPref("derp:" + strings.TrimPrefix(tok, "derp:"))
+		if err == nil {
+			t.Errorf("%s: expected error, got pref %+v", tok, p)
+		}
+	}
+	// Max valid region ID accepted.
+	if _, err := parseConnPref("derp:65535"); err != nil {
+		t.Errorf("derp:65535 should be accepted, got %v", err)
 	}
 }

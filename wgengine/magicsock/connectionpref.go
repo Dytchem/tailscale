@@ -47,6 +47,12 @@ type connPrefEntry struct {
 type connPref struct {
 	entries []connPrefEntry
 
+	// explicit is true when the user explicitly configured a preference
+	// (non-empty TS_CONNECTION_PREFERENCE). The default and zero-value
+	// preferences are not explicit and must behave exactly like upstream
+	// Tailscale (in particular, no "prefer" reordering of trusted paths).
+	explicit bool
+
 	// Cached lookups for quick checks:
 	hasDirect    bool
 	hasPeerRelay bool
@@ -95,6 +101,7 @@ func parseConnPref(s string) (connPref, error) {
 		if err != nil {
 			return defaultConnPref(), fmt.Errorf("invalid TS_CONNECTION_PREFERENCE token %q: %w", token, err)
 		}
+		p.explicit = true
 		p.entries = append(p.entries, entry)
 		switch entry.method {
 		case connMethodDirect:
@@ -135,7 +142,7 @@ func parseConnPrefToken(token string) (connPrefEntry, error) {
 			return connPrefEntry{method: connMethodDERP}, nil
 		}
 		rid, err := strconv.Atoi(rest)
-		if err != nil || rid <= 0 {
+		if err != nil || rid <= 0 || rid > 65535 {
 			return connPrefEntry{}, fmt.Errorf("invalid DERP region ID %q", rest)
 		}
 		return connPrefEntry{method: connMethodDERP, regionIDs: []int{rid}}, nil
@@ -153,7 +160,7 @@ func getConnPref(logf logger.Logf) connPref {
 	s := debugConnectionPreference()
 	p, err := parseConnPref(s)
 	if err != nil {
-		logf("[unexpected] %v; using default connection preference", err)
+		logf("invalid connection preference: %v; using default (all methods allowed)", err)
 	}
 	return p
 }
@@ -173,18 +180,22 @@ func (p connPref) allowPeerRelay() bool {
 }
 
 // preferDERPOverDirect reports whether, based on the preference order,
-// DERP should be preferred over a direct UDP path.
+// DERP should be used instead of a direct UDP path. Only meaningful for
+// explicitly configured preferences; the default behaves like upstream
+// (no reordering of trusted paths).
 func (p connPref) preferDERPOverDirect() bool {
-	if p.isZero() {
+	if p.isZero() || !p.explicit {
 		return false
 	}
 	return p.methodPosition(connMethodDERP) < p.methodPosition(connMethodDirect)
 }
 
-// preferDERPOverPeerRelay reports whether DERP should be preferred over peer relay.
+// preferDERPOverPeerRelay reports whether DERP should be used instead of a
+// peer relay path. Only meaningful for explicitly configured preferences;
+// the default behaves like upstream (no reordering of trusted paths).
 func (p connPref) preferDERPOverPeerRelay() bool {
-	if p.isZero() {
-		return true
+	if p.isZero() || !p.explicit {
+		return false
 	}
 	return p.methodPosition(connMethodDERP) < p.methodPosition(connMethodPeerRelay)
 }
@@ -238,6 +249,27 @@ func (p connPref) derpRegionAllowed(regionID int) bool {
 		return true
 	}
 	return p.derpRegion[regionID]
+}
+
+// preferredDerpRegionForSend returns the DERP region to use when sending to a
+// peer whose home DERP region is peerRegion, honoring the preference.
+//
+// A peer's region that is not in the explicit preference list is replaced by
+// our own home DERP (myDerp) rather than connecting to a non-preferred region.
+// If DERP is entirely disallowed, or no fallback region is available, 0 is
+// returned to mean "no DERP". The default (non-explicit) preference passes the
+// peer region through unchanged.
+func preferredDerpRegionForSend(pref connPref, peerRegion, myDerp int) int {
+	if !pref.explicit {
+		return peerRegion
+	}
+	if !pref.derpAllowed() {
+		return 0
+	}
+	if len(pref.derpOrder) > 0 && !pref.derpRegionAllowed(peerRegion) {
+		return myDerp
+	}
+	return peerRegion
 }
 
 // selectPreferredDERP applies DERP region ordering from the preference.

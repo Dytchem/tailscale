@@ -143,12 +143,21 @@ func (c *Conn) pickDERPFallback() int {
 		return pickDERPFallbackForTests()
 	}
 
-	// If connection preference specifies DERP region ordering, pick the first.
-	if cPref := c.connectionPref; !cPref.hasAnyDERP && len(cPref.derpOrder) > 0 {
-		if _, ok := c.derpMap.Regions[cPref.derpOrder[0]]; ok {
-			return cPref.derpOrder[0]
+	// If the preference disallows DERP entirely, don't pick a home DERP.
+	if cPref := c.connectionPref; cPref.explicit && !cPref.derpAllowed() {
+		return 0
+	}
+
+	// If the preference specifies concrete DERP region ordering, pick the
+	// first region that exists in the DERP map.
+	if cPref := c.connectionPref; len(cPref.derpOrder) > 0 {
+		dm := c.derpMapAtomic.Load()
+		for _, rid := range cPref.derpOrder {
+			if _, ok := dm.Regions[rid]; ok {
+				return rid
+			}
 		}
-		return 0 // specific region not in map, no DERP
+		return 0 // specific region(s) not in map, no DERP
 	}
 
 	metricDERPHomeFallback.Add(1)
@@ -212,17 +221,28 @@ func (c *Conn) maybeSetNearestDERP(report *netcheck.Report, force bool) (preferr
 	// Apply connection preference for DERP region selection.
 	// If the user has specified a preferred DERP region ordering,
 	// use that instead of the latency-based selection.
-	// If no preferred region is reachable and the preference only allows
-	// specific regions (no wildcard), don't fall back to any DERP.
-	if cPref := c.connectionPref; !cPref.hasAnyDERP && len(cPref.derpOrder) > 0 {
+	cPref := c.connectionPref
+	switch {
+	case cPref.explicit && !cPref.derpAllowed():
+		// The preference disallows DERP entirely (e.g. "direct" or
+		// "peer-relay" only): never select a home DERP.
+		preferredDERP = 0
+	case len(cPref.derpOrder) > 0:
+		// Specific regions are preferred over the wildcard, if any.
+		// If no preferred region is reachable and the preference only allows
+		// specific regions (no wildcard), don't fall back to any DERP.
+		dm := c.derpMapAtomic.Load()
 		regionExists := func(rid int) bool {
-			_, ok := c.derpMap.Regions[rid]
+			_, ok := dm.Regions[rid]
 			return ok
 		}
-		if selected := cPref.selectPreferredDERP(report.RegionLatency, c.myDerp, regionExists); selected != 0 {
+		if selected := cPref.selectPreferredDERP(report.RegionLatency, myDerp, regionExists); selected != 0 {
 			preferredDERP = selected
+		} else if len(dm.Regions) > 0 {
+			c.logf("magicsock: connection preference DERP regions %v not present in DERP map; DERP disabled", cPref.derpOrder)
+			preferredDERP = 0
 		} else {
-			preferredDERP = 0 // no fallback when specific regions are required
+			preferredDERP = 0 // no DERP map yet
 		}
 	}
 
@@ -273,18 +293,24 @@ func (c *Conn) setHomeDERPGaugeLocked(derpNum int) {
 	}
 }
 
+// setMyDerpLocked updates c.myDerp and its lock-free mirror. c.mu must be held.
+func (c *Conn) setMyDerpLocked(n int) {
+	c.myDerp = n
+	c.myDerpAtomic.Store(int32(n))
+}
+
 // c.mu must NOT be held.
 func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.wantDerpLocked() {
-		c.myDerp = 0
+		c.setMyDerpLocked(0)
 		c.setHomeDERPGaugeLocked(0)
 		c.health.SetMagicSockDERPHome(0, c.homeless)
 		return false
 	}
 	if c.homeless {
-		c.myDerp = 0
+		c.setMyDerpLocked(0)
 		c.setHomeDERPGaugeLocked(0)
 		c.health.SetMagicSockDERPHome(0, c.homeless)
 		return false
@@ -296,7 +322,7 @@ func (c *Conn) setNearestDERP(derpNum int) (wantDERP bool) {
 	if c.myDerp != 0 && derpNum != 0 {
 		metricDERPHomeChange.Add(1)
 	}
-	c.myDerp = derpNum
+	c.setMyDerpLocked(derpNum)
 	c.setHomeDERPGaugeLocked(derpNum)
 	c.health.SetMagicSockDERPHome(derpNum, c.homeless)
 
@@ -380,10 +406,14 @@ func (c *Conn) derpWriteChanForRegion(regionID int, peer key.NodePublic) chan de
 		return nil
 	}
 
-	// If the connection preference specifies exact DERP regions and this
-	// region is not in the allowed list, don't create or use a connection.
-	if !c.connectionPref.hasAnyDERP && len(c.connectionPref.derpOrder) > 0 {
-		if !c.connectionPref.derpRegionAllowed(regionID) {
+	// If the connection preference disallows DERP entirely, or specifies
+	// exact DERP regions and this region is not in the allowed list,
+	// don't create or use a connection.
+	if cPref := c.connectionPref; cPref.explicit {
+		if !cPref.derpAllowed() {
+			return nil
+		}
+		if len(cPref.derpOrder) > 0 && !cPref.derpRegionAllowed(regionID) {
 			return nil
 		}
 	}
@@ -892,7 +922,7 @@ func (c *Conn) setDERPMap(dm *tailcfg.DERPMap, doReStun bool) {
 			}
 			changes = true
 			if rid == c.myDerp {
-				c.myDerp = 0
+				c.setMyDerpLocked(0)
 			}
 			c.closeDerpLocked(rid, "derp-region-redefined")
 		}
