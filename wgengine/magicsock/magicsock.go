@@ -2661,6 +2661,15 @@ func (c *Conn) handlePingLocked(dm *disco.Ping, src epAddr, di *discoInfo, derpN
 		if !pref.directAllowed() && pref.derpAllowed() {
 			ourDerp := c.myDerp
 			if ourDerp != 0 {
+				if numNodes > 1 {
+					// Node sharing: the disco key maps to multiple nodes, so
+					// dstKey is zero and a DERP-framed PONG would be dropped
+					// by the server. Direct is disallowed, so there is no
+					// compliant way to reply: drop and log instead of
+					// silently black-holing the peer's discovery.
+					c.logf("magicsock: dropping PONG to shared disco key %v (direct disallowed by connection preference)", di.discoShort)
+					return
+				}
 				ipDst = epAddr{ap: netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, uint16(ourDerp))}
 			} else {
 				return

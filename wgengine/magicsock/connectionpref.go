@@ -307,6 +307,10 @@ func (p connPref) selectPreferredDERP(regionLatency map[int]time.Duration, curre
 	}
 
 	if p.hasAnyDERP && len(p.derpOrder) == 0 {
+		// Defensive: production callers gate on len(derpOrder) > 0, so this
+		// branch is only reachable from tests. Returning 0 delegates the
+		// selection to the existing netcheck logic, which is the correct
+		// behavior for a wildcard-only preference.
 		return 0 // let existing logic handle it
 	}
 

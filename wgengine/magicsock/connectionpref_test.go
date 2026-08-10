@@ -4,12 +4,16 @@
 package magicsock
 
 import (
+	"net/netip"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"tailscale.com/envknob"
+	"tailscale.com/net/packet"
+	"tailscale.com/tailcfg"
+	"tailscale.com/tstime/mono"
 )
 
 // TestMain clears TS_CONNECTION_PREFERENCE so a developer's shell
@@ -531,5 +535,167 @@ func TestDerpRegionBanned(t *testing.T) {
 		if !derpRegionBanned(p, 1) {
 			t.Errorf("pref %q should ban all DERP regions", pref)
 		}
+	}
+}
+
+// TestAddrForSendLockedPrefs exercises addrForSendLocked across preference x
+// path-state combinations. It locks in the send-path gating for the trusted
+// and expired branches (regression surface for S1/M4-style bugs).
+func TestAddrForSendLockedPrefs(t *testing.T) {
+	direct := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:1234")}
+	var vniID packet.VirtualNetworkID
+	vniID.Set(42)
+	vni := epAddr{ap: netip.MustParseAddrPort("192.0.2.1:1234"), vni: vniID}
+	derp901 := netip.AddrPortFrom(tailcfg.DerpMagicIPAddr, 901)
+
+	derpMap := &tailcfg.DERPMap{Regions: map[int]*tailcfg.DERPRegion{
+		901: {RegionID: 901, RegionCode: "a", Nodes: []*tailcfg.DERPNode{{Name: "a1", RegionID: 901, HostName: "a.test", IPv4: "127.0.0.1"}}},
+	}}
+
+	tests := []struct {
+		name     string
+		pref     string
+		best     epAddr
+		trusted  bool // trustBestAddrUntil in the future
+		wantUDP  bool
+		wantDERP bool
+	}{
+		{
+			name:     "default_trusted_direct_single_path",
+			pref:     "",
+			best:     direct,
+			trusted:  true,
+			wantUDP:  true,
+			wantDERP: false,
+		},
+		{
+			name:     "default_trusted_vni_single_path",
+			pref:     "",
+			best:     vni,
+			trusted:  true,
+			wantUDP:  true,
+			wantDERP: false,
+		},
+		{
+			name:     "derp_only_trusted_direct_replaced",
+			pref:     "derp:901",
+			best:     direct,
+			trusted:  true,
+			wantUDP:  false,
+			wantDERP: true,
+		},
+		{
+			name:     "direct_only_trusted_direct_kept",
+			pref:     "direct",
+			best:     direct,
+			trusted:  true,
+			wantUDP:  true,
+			wantDERP: false,
+		},
+		{
+			name:     "direct_only_trusted_vni_nothing",
+			pref:     "direct",
+			best:     vni,
+			trusted:  true,
+			wantUDP:  false,
+			wantDERP: false,
+		},
+		{
+			name:     "derp_wildcard_direct_prefer_derp_single",
+			pref:     "derp:*,direct",
+			best:     direct,
+			trusted:  true,
+			wantUDP:  false,
+			wantDERP: true,
+		},
+		{
+			name:     "no_peer_relay_vni_replaced_by_derp",
+			pref:     "direct,derp:901",
+			best:     vni,
+			trusted:  true,
+			wantUDP:  false,
+			wantDERP: true,
+		},
+		{
+			name:     "peer_relay_only_vni_kept",
+			pref:     "peer-relay",
+			best:     vni,
+			trusted:  true,
+			wantUDP:  true,
+			wantDERP: false,
+		},
+		{
+			name:     "peer_relay_only_direct_nothing",
+			pref:     "peer-relay",
+			best:     direct,
+			trusted:  true,
+			wantUDP:  false,
+			wantDERP: false,
+		},
+		{
+			name:     "expired_direct_derp_only_derp",
+			pref:     "derp:901",
+			best:     direct,
+			trusted:  false,
+			wantUDP:  false,
+			wantDERP: true,
+		},
+		{
+			name:     "expired_vni_no_peer_relay_derp",
+			pref:     "direct,derp:901",
+			best:     vni,
+			trusted:  false,
+			wantUDP:  false,
+			wantDERP: true,
+		},
+		{
+			name:     "expired_vni_no_peer_relay_no_derp_nothing",
+			pref:     "direct",
+			best:     vni,
+			trusted:  false,
+			wantUDP:  false,
+			wantDERP: false,
+		},
+		{
+			name:     "expired_default_dual_send",
+			pref:     "",
+			best:     direct,
+			trusted:  false,
+			wantUDP:  true,
+			wantDERP: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newConn(t.Logf)
+			if tt.pref != "" {
+				p, err := parseConnPref(tt.pref)
+				if err != nil {
+					t.Fatalf("parseConnPref(%q): %v", tt.pref, err)
+				}
+				c.connectionPref = p
+			}
+			c.derpMapAtomic.Store(derpMap)
+
+			now := mono.Now()
+			trustUntil := now.Add(-time.Hour)
+			if tt.trusted {
+				trustUntil = now.Add(time.Hour)
+			}
+			de := &endpoint{
+				c:                  c,
+				bestAddr:           addrQuality{epAddr: tt.best},
+				trustBestAddrUntil: trustUntil,
+				derpAddr:           derp901,
+			}
+
+			gotUDP, gotDERP, _ := de.addrForSendLocked(now)
+			if got := gotUDP.ap.IsValid(); got != tt.wantUDP {
+				t.Errorf("udpAddr valid = %v, want %v (udp=%v)", got, tt.wantUDP, gotUDP)
+			}
+			if got := gotDERP.IsValid(); got != tt.wantDERP {
+				t.Errorf("derpAddr valid = %v, want %v (derp=%v)", got, tt.wantDERP, gotDERP)
+			}
+		})
 	}
 }

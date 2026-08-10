@@ -55,10 +55,28 @@ Notes on DERP selection:
   fallback for any region not explicitly listed.
 - A region is only ever selected if it exists in the DERP map the control
   server advertised; a nonexistent region ID will never be force-connected to
-  (which would drop all traffic).
+  (which would drop all traffic). A missing preferred region logs an error
+  and disables DERP entirely (or falls back to the wildcard, if present).
 - An invalid token in the list logs an error and falls back to the default
-  (all methods allowed) preference, so a typo is loud instead of silently
-  restricting to nothing.
+  (all methods allowed) preference — the failure mode is "everything
+  allowed", not "nothing allowed". A typo is loud (startup log) but
+  permissive; double-check the value if you rely on it for isolation.
+
+### Behavior details
+
+- Any method not listed in the preference is disabled. For example
+  `direct,derp:900` disables peer relay entirely (both discovery and use),
+  and `derp:901` disables direct connections.
+- When sending to a peer whose home DERP region is not in your preference
+  list, your own home DERP region is used instead (or, early at startup
+  before the first netcheck, no DERP until a home is selected).
+- PINGs that arrive over a disallowed direct path get their PONG redirected
+  through your home DERP; if DERP is also disallowed (e.g. `peer-relay`
+  only), the PONG is dropped.
+- Incoming PINGs over peer relay (Geneve) are always answered over the same
+  relay path; the preference governs which paths *this* node uses.
+- WireGuard-only peers (no disco/DERP support) are exempt from the
+  preference and are always reached directly.
 
 ### Example: Force DERP 902 only
 
