@@ -11,8 +11,13 @@ on:
       - .github/workflows/update-flake.yml
   workflow_dispatch:
 
+# Fork-only: FlakeHub publishing requires a FlakeHub access token that only
+# the upstream repo has; never run in forks.
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+jobs:
+  flakehub-publish:
+    if: github.repository == 'tailscale/tailscale'
   cancel-in-progress: true
 
 jobs:
